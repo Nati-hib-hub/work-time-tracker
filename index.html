@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Work Time Tracker</title>
+  <meta name="description" content="Arbeitszeiten erfassen, komplett ohne Internet. Alle Daten bleiben auf dem Gerät.">
+  <meta name="theme-color" content="#1f7a6d" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#11171a" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Work Time Tracker">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top"><h1>Work Time Tracker</h1></header>
+
+  <main id="view"><p class="muted empty">Die App wird geladen …</p></main>
+
+  <nav class="nav" aria-label="Bereiche">
+    <button data-act="tab" data-tab="home" class="on"><span class="nav-icon">⏱️</span>Heute</button>
+    <button data-act="tab" data-tab="hist"><span class="nav-icon">🗓️</span>Verlauf</button>
+    <button data-act="tab" data-tab="rep"><span class="nav-icon">📊</span>Berichte</button>
+    <button data-act="tab" data-tab="set"><span class="nav-icon">⚙️</span>Einstellungen</button>
+  </nav>
+
+  <div id="backdrop" class="backdrop" hidden>
+    <div id="sheet" class="sheet" role="dialog" aria-modal="true"></div>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <noscript><p style="padding:1rem">Diese App braucht JavaScript. Bitte im Browser einschalten.</p></noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
