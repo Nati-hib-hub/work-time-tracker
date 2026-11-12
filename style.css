@@ -29,10 +29,42 @@
   --hint-ink: #523c06;
   --radius: 18px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 18px rgba(0, 0, 0, 0.05);
+  color-scheme: light;
+}
+
+/* Dunkel: entweder nach Handy-Einstellung (data-theme fehlt) oder fest gewählt (data-theme="dark").
+   Die beiden Farblisten unten müssen gleich bleiben. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #11171a;
+  --card: #1b2428;
+  --text: #e9eef0;
+  --muted: #9aa7ae;
+  --line: #2c383d;
+  --accent: #45b8a6;
+  --accent-ink: #06211d;
+  --go: #4cc083;
+  --wait: #eba94a;
+  --stop: #f0756c;
+  --btn-ink: #0d1416;
+  --c0: #7aa3f2;
+  --c1: #eda65c;
+  --c2: #56c588;
+  --c3: #b08ced;
+  --c4: #ee86b6;
+  --c5: #55c3d6;
+  --c6: #c9a27e;
+  --c7: #a3b1c6;
+  --place-ink: #0d1416;
+  --hint-bg: #3a3012;
+  --hint-line: #6f5b1d;
+  --hint-ink: #f6e4ad;
+  --shadow: none;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #11171a;
     --card: #1b2428;
     --text: #e9eef0;

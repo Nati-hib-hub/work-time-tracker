@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, holidaysNRW, period, shiftAnchor, taxReport 
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.9 · Rückfrage bei Krankentagen';
+const VERSION = '0.10 · Hell/Dunkel wählbar, Sanduhr';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -49,6 +49,20 @@ function applyPlaceColors() {
   }
   el.textContent = M.allPlaces().map((p) => `.place-${p.id}{--pc:var(--c${p.color})}`).join('\n');
 }
+// Hell oder dunkel: nach Handy-Einstellung oder fest gewählt
+const THEME_BAR = { light: '#1f7a6d', dark: '#11171a' };
+function applyTheme() {
+  const th = state.settings.theme;
+  const root = document.documentElement;
+  if (th === 'light' || th === 'dark') root.dataset.theme = th;
+  else delete root.dataset.theme;
+  // Farbe der Leiste oben am Handy
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+    const sys = (m.getAttribute('media') || '').includes('dark') ? 'dark' : 'light';
+    m.setAttribute('content', THEME_BAR[th === 'light' || th === 'dark' ? th : sys]);
+  });
+}
+
 const isTyping = () => ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement || {}).tagName);
 const hasSpeech = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
@@ -808,6 +822,17 @@ function viewSettings() {
            ${M.allPlaces().filter((p) => p.hidden).map(placeRow).join('')}`
         : ''
     }
+  </section>
+  <section class="card">
+    <h2>Darstellung</h2>
+    <div class="chips mode-chips">${[
+      ['auto', '📱 Auto'],
+      ['light', '☀️ Hell'],
+      ['dark', '🌙 Dunkel'],
+    ]
+      .map(([k, label]) => `<button class="chip ${(s.theme || 'auto') === k ? 'on' : ''}" data-act="setTheme" data-theme="${k}">${label}</button>`)
+      .join('')}</div>
+    <p class="muted small">„Hell“ heißt heller Hintergrund mit dunkler Schrift, „Dunkel“ das Gegenteil. „Auto“ richtet sich nach dem Tag- oder Nachtmodus deines Handys.</p>
   </section>
   <section class="card">
     <h2>Hinweise beim Öffnen</h2>
@@ -1624,6 +1649,16 @@ const actions = {
     refreshPlaceSheet();
   },
 
+  setTheme(el) {
+    state.settings.theme = el.dataset.theme;
+    applyTheme();
+    saveSettings();
+    const view = $('#view');
+    const top = view.scrollTop;
+    render();
+    view.scrollTop = top;
+  },
+
   // --- Kategorie ---
   // „Weitere“ klappt die übrigen Kategorien auf und wieder zu
   catMore(el) {
@@ -1896,6 +1931,7 @@ async function init() {
     }
     M.setPlaces(state.settings.places);
     applyPlaceColors();
+    applyTheme();
     if (repaired) saveSettings();
   } catch (err) {
     console.error(err);

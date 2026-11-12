@@ -124,6 +124,7 @@ export function defaultSettings() {
     places: [],
     warnRunHours: 10,
     warnPauseHours: 3,
+    theme: 'auto', // Darstellung: 'auto' = wie das Handy, 'light' = hell, 'dark' = dunkel
   };
 }
 
