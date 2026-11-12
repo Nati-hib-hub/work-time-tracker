@@ -6,64 +6,140 @@ export const MIN = 60000;
 export const HOUR = 3600000;
 export const DAY = 86400000;
 
-export const PLACE_IDS = ['schule', 'homeoffice', 'naturgut', 'fahrt'];
-
-// categories: Auswahl an Kategorien für diesen Ort, die erste ist der Standard.
-// detailed: Im Bericht bekommt jeder Arbeitsabschnitt (zwischen zwei Pausen) eine eigene Zeile und Notiz.
-export const PLACE_META = {
-  schule: {
-    icon: '🏫',
-    defaultName: 'Schule',
-    defaultCategory: 'Unterricht',
-    categories: ['Unterricht', 'Konferenz', 'Schulfest', 'Projektwoche', 'Elterngespräch', 'Fortbildung', 'Sonstiges'],
-  },
-  homeoffice: {
-    icon: '🏠',
-    defaultName: 'Homeoffice',
-    defaultCategory: 'Unterrichtsvorbereitung',
-    categories: ['Unterrichtsvorbereitung', 'Korrekturen', 'Konferenz (online)', 'Elterngespräch', 'Fortbildung', 'Sonstiges'],
-  },
-  naturgut: {
-    icon: '🌿',
-    defaultName: 'NaturGut Ophoven',
-    defaultCategory: 'NaturGut',
-    categories: ['NaturGut', 'Konferenz', 'Fortbildung', 'Fest/Veranstaltung', 'Sonstiges'],
-    detailed: true,
-  },
-  fahrt: {
-    icon: '🚌',
-    defaultName: 'Klassenfahrt / Ausflug',
-    defaultCategory: 'Klassenfahrt',
-    categories: ['Klassenfahrt', 'Ausflug', 'Sonstiges'],
-  },
-};
-
-export const isDetailed = (place) => !!(PLACE_META[place] && PLACE_META[place].detailed);
-export const categoriesFor = (place) => (PLACE_META[place] ? PLACE_META[place].categories : []);
-
 export const LABEL = { start: 'Start', pause: 'Pause', weiter: 'Weiter', stopp: 'Stopp' };
 export const WEEKDAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 export const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+
+// ---------- Arbeitsorte ----------
+//
+// Die Arbeitsorte stehen in den Einstellungen und lassen sich in der App ändern und ergänzen.
+// Ein Arbeitsort hat:
+//   id          feste Kennung, mit der die Arbeitsblöcke ihren Ort merken
+//   name, icon  Anzeige
+//   color       Nummer der Farbe (0 bis 7, die Farben selbst stehen in style.css)
+//   categories  Auswahl an Kategorien, die erste ist beim Start automatisch gewählt
+//   detailed    ausführlicher Bericht: jeder Abschnitt zwischen zwei Pausen hat eine eigene Zeile und Notiz
+//   hidden      ausgeblendet: wird nicht mehr zur Auswahl angeboten, alte Zeiten bleiben erhalten
+//   trip        Klassenfahrt: keine Hinweise bei langer Laufzeit
+//   home        Arbeitsplatz zu Hause: zählt in der Steuer-Übersicht als Homeoffice
+
+export const COLOR_NAMES = ['Blau', 'Orange', 'Grün', 'Lila', 'Pink', 'Türkis', 'Braun', 'Grau'];
+export const ICONS = ['🏫', '🏠', '🌿', '🚌', '🏛️', '🎓', '🧪', '📚', '💼', '🌳', '🏢', '⭐'];
+
+const DEFAULT_PLACES = [
+  {
+    id: 'schule',
+    name: 'Schule',
+    icon: '🏫',
+    color: 0,
+    categories: ['Unterricht', 'Konferenz', 'Schulfest', 'Projektwoche', 'Elterngespräch', 'Fortbildung', 'Sonstiges'],
+  },
+  {
+    id: 'homeoffice',
+    name: 'Homeoffice',
+    icon: '🏠',
+    color: 1,
+    categories: ['Unterrichtsvorbereitung', 'Korrekturen', 'Konferenz (online)', 'Elterngespräch', 'Fortbildung', 'Sonstiges'],
+  },
+  {
+    id: 'naturgut',
+    name: 'NaturGut Ophoven',
+    icon: '🌿',
+    color: 2,
+    categories: ['NaturGut', 'Konferenz', 'Fortbildung', 'Fest/Veranstaltung', 'Sonstiges'],
+    detailed: true,
+  },
+  {
+    id: 'fahrt',
+    name: 'Klassenfahrt / Ausflug',
+    icon: '🚌',
+    color: 3,
+    categories: ['Klassenfahrt', 'Ausflug', 'Sonstiges'],
+    trip: true,
+  },
+];
+
+function cleanPlace(p, i) {
+  const cats = Array.isArray(p.categories) ? p.categories.map((c) => String(c).trim()).filter(Boolean) : [];
+  return {
+    id: String(p.id),
+    name: String(p.name || '').trim().slice(0, 40) || 'Arbeitsort',
+    icon: p.icon || '💼',
+    color: Number.isInteger(p.color) ? ((p.color % 8) + 8) % 8 : i % 8,
+    categories: cats.length ? cats : ['Allgemein', 'Sonstiges'],
+    detailed: !!p.detailed,
+    hidden: !!p.hidden,
+    trip: !!p.trip,
+    // Arbeitsplatz zu Hause (für die Steuer-Übersicht). Bei älteren Daten fehlt die Angabe noch.
+    home: p.home === undefined ? p.id === 'homeoffice' : !!p.home,
+  };
+}
+
+// Eine neu installierte App hat noch keine Arbeitsorte. Diese Vorlagen werden beim ersten Start
+// zum Antippen angeboten, damit niemand alles von Hand anlegen muss.
+const TEMPLATE_IDS = ['schule', 'homeoffice', 'fahrt'];
+export const placeTemplates = () => DEFAULT_PLACES.filter((p) => TEMPLATE_IDS.includes(p.id)).map(cleanPlace);
+
+// Arbeitsort zu einer Kennung, die in gespeicherten Arbeitsblöcken vorkommt, aber in der Liste fehlt
+export function repairPlace(id) {
+  const known = DEFAULT_PLACES.find((p) => p.id === id);
+  return cleanPlace(known || { id, name: 'Unbekannter Ort', icon: '❓', color: 7, categories: ['Sonstiges'], hidden: true }, 0);
+}
+
+let places = [];
+
+// Wird beim Start und nach jeder Änderung der Einstellungen aufgerufen
+export function setPlaces(list) {
+  places = list;
+}
+export const allPlaces = () => places;
+export const visiblePlaces = () => places.filter((p) => !p.hidden);
+export const placeIds = () => places.map((p) => p.id);
+
+// Liefert immer einen Arbeitsort, auch wenn die Kennung unbekannt ist (z. B. nach einem Fehler)
+export function placeOf(id) {
+  return places.find((p) => p.id === id) || { id, name: 'Unbekannter Ort', icon: '❓', color: 7, categories: ['Sonstiges'], detailed: false, hidden: true, trip: false, home: false };
+}
+export const isDetailed = (id) => placeOf(id).detailed;
+export const categoriesFor = (id) => placeOf(id).categories;
+export const defaultCategory = (id) => placeOf(id).categories[0] || 'Sonstiges';
+
+export function newPlace() {
+  const used = places.map((p) => p.color);
+  let color = 0;
+  for (let c = 0; c < 8; c++) {
+    if (!used.includes(c)) {
+      color = c;
+      break;
+    }
+  }
+  return cleanPlace({ id: `p${uid()}`, name: 'Neuer Arbeitsort', icon: '💼', color, categories: ['Allgemein', 'Sonstiges'] }, 0);
+}
 
 // ---------- Einstellungen ----------
 
 export function defaultSettings() {
   return {
     userName: '',
-    places: Object.fromEntries(PLACE_IDS.map((id) => [id, { name: PLACE_META[id].defaultName }])),
+    places: [],
     warnRunHours: 10,
     warnPauseHours: 3,
   };
 }
 
-export function mergeSettings(saved) {
+// saved = gespeicherte Einstellungen (oder nichts), hasBlocks = es gibt schon gespeicherte Arbeitsblöcke
+export function mergeSettings(saved, hasBlocks) {
   const d = defaultSettings();
-  if (!saved) return d;
-  return {
-    ...d,
-    ...saved,
-    places: Object.fromEntries(PLACE_IDS.map((id) => [id, { ...d.places[id], ...((saved.places || {})[id] || {}) }])),
-  };
+  let list = [];
+  if (saved && Array.isArray(saved.places)) {
+    list = saved.places.filter((p) => p && p.id).map(cleanPlace);
+  } else if (saved || hasBlocks) {
+    // Ältere Fassung der App: Dort gab es vier fest eingebaute Orte, gespeichert waren nur ihre Namen.
+    const old = (saved && saved.places) || {};
+    list = DEFAULT_PLACES.map(cleanPlace).map((p) => ({ ...p, name: (old[p.id] && String(old[p.id].name || '').trim()) || p.name }));
+  }
+  // Sonst: ganz neue App, noch ohne Arbeitsorte.
+  return { ...d, ...(saved || {}), places: list };
 }
 
 // ---------- Datum und Uhrzeit ----------
@@ -132,7 +208,7 @@ export function newBlock(place, ts) {
   return {
     id: uid(),
     place,
-    category: PLACE_META[place].defaultCategory,
+    category: defaultCategory(place),
     events: [{ t: 'start', ts }],
   };
 }

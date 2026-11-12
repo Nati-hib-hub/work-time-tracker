@@ -2,11 +2,11 @@
 
 import * as M from './model.js';
 import * as store from './store.js';
-import { PERIOD_KINDS, buildReport, period, shiftAnchor } from './report.js';
+import { PERIOD_KINDS, buildReport, holidaysNRW, period, shiftAnchor, taxReport } from './report.js';
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.2 · Berichte und Kategorien';
+const VERSION = '0.9 · Rückfrage bei Krankentagen';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -19,6 +19,11 @@ const ui = {
   detailId: null,
   histMonth: { y: today.getFullYear(), m: today.getMonth() },
   // Bericht: Art des Zeitraums, ein Zeitpunkt darin, Arbeitsort ('all' = alle) und die Tage für "Von–Bis"
+  catsOpen: null, // Arbeitsblock, bei dem „Weitere“ Kategorien gerade aufgeklappt sind
+  repMode: 'zeit', // 'zeit' = Arbeitszeit-Berichte, 'steuer' = Tage zählen für die Steuererklärung, 'krank' = Krankentage
+  sickMonth: { y: today.getFullYear(), m: today.getMonth() },
+  taxKind: 'jahr', // 'jahr' = Kalenderjahr, 'schuljahr'
+  taxAnchor: today.getTime(),
   rep: { kind: 'monat', anchor: today.getTime(), place: 'all', from: M.dayKey(today.getTime()), to: M.dayKey(today.getTime()) },
   sheet: null,
 };
@@ -29,8 +34,21 @@ const now = () => M.floorMin(Date.now());
 const byId = (id) => state.blocks.find((b) => b.id === id);
 const openBlock = () =>
   state.blocks.filter((b) => M.stateOf(b) !== 'done').sort((a, b) => M.blockStart(b) - M.blockStart(a))[0] || null;
-const placeName = (id) => (state.settings.places[id] && state.settings.places[id].name) || M.PLACE_META[id].defaultName;
-const placeLabel = (id) => `${M.PLACE_META[id].icon} ${esc(placeName(id))}`;
+const placeName = (id) => M.placeOf(id).name;
+const placeLabel = (id) => `${M.placeOf(id).icon} ${esc(placeName(id))}`;
+// Orte zur Auswahl: alle sichtbaren, dazu der gerade gewählte, falls er ausgeblendet ist
+const choosablePlaces = (currentId) => M.allPlaces().filter((p) => !p.hidden || p.id === currentId);
+
+// Jeder Arbeitsort bekommt seine Farbe über eine kleine, automatisch erzeugte Stilvorlage.
+function applyPlaceColors() {
+  let el = $('#place-colors');
+  if (!el) {
+    el = document.createElement('style');
+    el.id = 'place-colors';
+    document.head.append(el);
+  }
+  el.textContent = M.allPlaces().map((p) => `.place-${p.id}{--pc:var(--c${p.color})}`).join('\n');
+}
 const isTyping = () => ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement || {}).tagName);
 const hasSpeech = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
@@ -70,7 +88,7 @@ function sumRange(t, from, to) {
 const sumToday = (t) => sumRange(t, M.startOfDay(t), M.addDays(M.startOfDay(t), 1));
 
 // Vorschläge für Notizen: was am selben Arbeitsort am häufigsten verwendet wurde, steht vorn.
-// Bei gleicher Häufigkeit kommt die zuletzt verwendete Notiz zuerst. Es gibt höchstens fünf Vorschläge.
+// Bei gleicher Häufigkeit kommt die zuletzt verwendete Notiz zuerst. Es gibt höchstens drei Vorschläge.
 function recentNotes(place, exceptId) {
   const stat = new Map();
   for (const b of state.blocks) {
@@ -85,7 +103,7 @@ function recentNotes(place, exceptId) {
   }
   return [...stat.values()]
     .sort((a, b) => b.count - a.count || b.last - a.last)
-    .slice(0, 5)
+    .slice(0, 3)
     .map((s) => s.n);
 }
 
@@ -94,7 +112,7 @@ const missingNotes = (b) => M.segments(b, now()).some((s) => s.kind === 'work' &
 // ---------- Hinweise beim Öffnen ----------
 
 function hints(b, t) {
-  if (!b || b.place === 'fahrt') return [];
+  if (!b || M.placeOf(b.place).trip) return [];
   const st = M.stateOf(b);
   const last = M.lastEvent(b);
   const s = state.settings;
@@ -138,7 +156,7 @@ function blockItem(b, t) {
   const to = st === 'done' ? M.fmtTime(M.lastEvent(b).ts) : st === 'paused' ? 'Pause' : 'läuft';
   const p = M.pauseMs(b, t);
   const notes = M.blockNotes(b).join(' · ');
-  const cat = b.category && b.category !== M.PLACE_META[b.place].defaultCategory ? ` · ${esc(b.category)}` : '';
+  const cat = b.category ? ` · ${esc(b.category)}` : '';
   return `<button class="item place-${b.place}" data-act="openDetail" data-id="${b.id}">
     <span class="dot"></span>
     <span class="item-main">
@@ -156,12 +174,33 @@ function noteField(b, idx, own, placeholder) {
 }
 
 // Kategorien zum Antippen. Eine frühere Kategorie, die es in der Liste nicht mehr gibt, bleibt wählbar.
+// Zu sehen sind zuerst die fünf Kategorien, die an diesem Arbeitsort am häufigsten verwendet wurden
+// (bei gleicher Häufigkeit in der Reihenfolge aus den Einstellungen). Der Rest steckt hinter „Weitere“.
+// Die gerade gewählte Kategorie ist immer sichtbar.
+const CAT_TOP = 5;
 function catChips(b) {
   const cats = [...M.categoriesFor(b.place)];
   if (b.category && !cats.includes(b.category)) cats.unshift(b.category);
-  return `<div class="chips">${cats
-    .map((c) => `<button class="chip ${c === b.category ? 'on' : ''}" data-act="setCat" data-id="${b.id}" data-cat="${esc(c)}">${esc(c)}</button>`)
-    .join('')}</div>`;
+  const count = {};
+  for (const x of state.blocks) {
+    if (x.place === b.place && x.id !== b.id && x.category) count[x.category] = (count[x.category] || 0) + 1;
+  }
+  const order = cats
+    .map((c, i) => ({ c, i, n: count[c] || 0 }))
+    .sort((a, z) => z.n - a.n || a.i - z.i)
+    .map((o) => o.c);
+  const top = order.slice(0, CAT_TOP);
+  let rest = order.slice(CAT_TOP);
+  if (rest.includes(b.category)) {
+    rest = [top.pop(), ...rest.filter((c) => c !== b.category)];
+    top.push(b.category);
+  }
+  const chip = (c) => `<button class="chip ${c === b.category ? 'on' : ''}" data-act="setCat" data-id="${b.id}" data-cat="${esc(c)}">${esc(c)}</button>`;
+  // Für eine einzige weitere Kategorie lohnt sich kein „Weitere“-Knopf.
+  if (rest.length <= 1) return `<div class="chips">${[...top, ...rest].map(chip).join('')}</div>`;
+  const open = ui.catsOpen === b.id;
+  return `<div class="chips">${top.map(chip).join('')}<button class="chip more-btn" data-act="catMore" data-id="${b.id}" aria-expanded="${open}">${open ? 'Weniger ▴' : 'Weitere ▾'}</button></div>
+  <div class="more-wrap ${open ? 'open' : ''}"><div class="chips more-inner">${rest.map(chip).join('')}</div></div>`;
 }
 
 function monthSwitch(which, mm) {
@@ -179,6 +218,13 @@ function viewHome() {
   const b = openBlock();
   const todayMs = sumToday(t);
   let h = hintsHtml(b, t);
+
+  if (!M.allPlaces().length) {
+    h += `<section class="card"><h2>Willkommen!</h2>${starterHtml()}</section>`;
+  } else if (M.allPlaces().length < 3 && M.placeTemplates().some((p) => !M.placeIds().includes(p.id)) && !state.blocks.length) {
+    // Solange noch nichts erfasst ist, bleiben die übrigen Vorlagen zum Antippen sichtbar.
+    h += `<section class="card"><h2>Weitere Arbeitsorte?</h2>${starterHtml()}</section>`;
+  }
 
   if (!b) {
     h += `<section class="status idle">
@@ -213,7 +259,7 @@ function viewHome() {
       ${catChips(b)}
       <label class="label">${label}</label>
       ${noteField(b, seg.idx, seg.ownNote, inherited ? `wie davor: ${inherited}` : 'z. B. Kurskonzept überarbeitet')}
-      ${chips.length ? `<div class="chips">${chips.map((n) => `<button class="chip" data-act="noteChip" data-id="${b.id}" data-idx="${seg.idx}" data-note="${esc(n)}">${esc(n)}</button>`).join('')}</div>` : ''}
+      ${chips.length ? `<span class="muted small">Oft geschriebene Notizen zum Antippen:</span><div class="chips">${chips.map((n) => `<button class="chip" data-act="noteChip" data-id="${b.id}" data-idx="${seg.idx}" data-note="${esc(n)}">${esc(n)}</button>`).join('')}</div>` : ''}
     </section>`;
   }
 
@@ -294,7 +340,7 @@ function viewDetail(b) {
   </section>
   <section class="card">
     <h2>Arbeitsort</h2>
-    <div class="place-chips">${M.PLACE_IDS.map((id) => `<button class="chip place-${id} ${id === b.place ? 'on' : ''}" data-act="setPlace" data-place="${id}">${placeLabel(id)}</button>`).join('')}</div>
+    <div class="place-chips">${choosablePlaces(b.place).map(({ id }) => `<button class="chip place-${id} ${id === b.place ? 'on' : ''}" data-act="setPlace" data-place="${id}">${placeLabel(id)}</button>`).join('')}</div>
   </section>
   <button class="btn danger-ghost" data-act="delAsk">Diesen Arbeitsblock löschen</button>`;
 }
@@ -370,8 +416,8 @@ function repControls(per) {
           <button class="icon-btn" data-act="repShift" data-d="1" aria-label="Vor blättern">›</button>
         </div>
         ${t < per.from || t >= per.to ? '<button class="btn small ghost today-btn" data-act="repNow">Zurück zu heute</button>' : ''}`;
-  const places = `<button class="chip place-all ${r.place === 'all' ? 'on' : ''}" data-act="repPlace" data-place="all">Alle zusammen</button>${M.PLACE_IDS.map(
-    (id) => `<button class="chip place-${id} ${id === r.place ? 'on' : ''}" data-act="repPlace" data-place="${id}">${placeLabel(id)}</button>`
+  const places = `<button class="chip place-all ${r.place === 'all' ? 'on' : ''}" data-act="repPlace" data-place="all">Alle zusammen</button>${choosablePlaces(r.place).map(
+    ({ id }) => `<button class="chip place-${id} ${id === r.place ? 'on' : ''}" data-act="repPlace" data-place="${id}">${placeLabel(id)}</button>`
   ).join('')}`;
   return `<div class="chips kinds">${kinds}</div>${range}<div class="place-chips">${places}</div>`;
 }
@@ -399,21 +445,29 @@ function columnChart(rep) {
   if (s.length < 2 || rep.totalMs <= 0) return '';
   const maxH = Math.max(...s.map((c) => c.ms)) / M.HOUR;
   const top = NICE_HOURS.find((n) => n >= maxH) || Math.ceil(maxH / 100) * 100;
+  // Krankentage je Säule (nur wenn sie angezeigt werden sollen)
+  let anySick = false;
+  for (const c of s) {
+    c.sick = showSick() ? sickCount(c.from, c.to).all : 0;
+    if (c.sick) anySick = true;
+  }
   const cols = s
     .map((c, i) => {
-      const ids = rep.all ? M.PLACE_IDS.filter((id) => c.parts[id] > 0) : c.ms > 0 ? [rep.place] : [];
+      const ids = rep.all ? M.placeIds().filter((id) => c.parts[id] > 0) : c.ms > 0 ? [rep.place] : [];
       const segs = ids.map((id) => `<span class="col-seg place-${id}" style="flex-grow:${Math.round((rep.all ? c.parts[id] : c.ms) / M.MIN)}"></span>`).join('');
-      const tip = `${c.full}: ${M.fmtDur(c.ms)} Std.`;
+      const tip = `${c.full}: ${M.fmtDur(c.ms)} Std.${c.sick ? `, ${nDays(c.sick)} krank markiert` : ''}`;
       return `<button class="col" data-act="colInfo" data-i="${i}" title="${esc(tip)}" aria-label="${esc(tip)}"><span class="col-stack" style="height:${((c.ms / (top * M.HOUR)) * 100).toFixed(1)}%">${segs}</span></button>`;
     })
     .join('');
-  const labels = s.map((c) => `<span>${esc(c.label)}</span>`).join('');
-  const legend =
-    rep.all && rep.byPlace.length > 1
-      ? `<div class="legend">${M.PLACE_IDS.filter((id) => rep.byPlace.some((p) => p.id === id))
-          .map((id) => `<span class="place-${id}"><span class="dot"></span> ${esc(placeName(id))}</span>`)
-          .join('')}</div>`
-      : '';
+  const labels = s.map((c) => `<span class="${c.sick ? 'sick' : ''}">${esc(c.label)}</span>`).join('');
+  const legendItems = [];
+  if (rep.all && rep.byPlace.length > 1) {
+    for (const id of M.placeIds().filter((x) => rep.byPlace.some((p) => p.id === x))) {
+      legendItems.push(`<span class="place-${id}"><span class="dot"></span> ${esc(placeName(id))}</span>`);
+    }
+  }
+  if (anySick) legendItems.push('<span><span class="dot sick-dot"></span> krank markiert</span>');
+  const legend = legendItems.length ? `<div class="legend">${legendItems.join('')}</div>` : '';
   const half = String(top / 2).replace('.', ',');
   return `<section class="card">
     <h2>Stunden pro ${rep.seriesUnit}</h2>
@@ -425,7 +479,7 @@ function columnChart(rep) {
         <div class="grid-line base" style="bottom:0"><span>0</span></div>
         <div class="cols">${cols}</div>
       </div>
-      <div class="col-labels">${labels}</div>
+      <div class="col-labels ${anySick ? 'has-sick' : ''}">${labels}</div>
     </div>
     <p class="muted small" id="col-info">Tippe auf eine Säule, um die genaue Zeit zu sehen.</p>
   </section>`;
@@ -457,7 +511,235 @@ function reportTable(rep) {
   </table></div>`;
 }
 
+const repModeChips = () => `<div class="chips mode-chips">
+    <button class="chip ${ui.repMode === 'zeit' ? 'on' : ''}" data-act="repMode" data-mode="zeit">Arbeitszeit</button>
+    <button class="chip ${ui.repMode === 'steuer' ? 'on' : ''}" data-act="repMode" data-mode="steuer">Steuer-Tage</button>
+    <button class="chip ${ui.repMode === 'krank' ? 'on' : ''}" data-act="repMode" data-mode="krank">Krankentage</button>
+  </div>`;
+
+// ---------- Krankentage: von Hand im Kalender markieren ----------
+
+const sickDays = () => state.settings.sickDays || [];
+// Sollen die Krankentage auch in den Statistiken zu sehen sein? (Schalter auf den Berichtsseiten)
+const showSick = () => state.settings.showSick !== false;
+const sickSwitch = () => `<label class="check slim"><input type="checkbox" data-change="showSick" ${showSick() ? 'checked' : ''}><span>Krankentage hier mit anzeigen</span></label>`;
+const sickLine = (n) => `<div class="tax-row"><span class="tax-name"><span class="sick-tag">krank</span> Als krank markiert${n.all !== n.work ? `<small>davon ${nDays(n.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(n.all)}</b></div>`;
+const keyToTs = (k) => new Date(`${k}T00:00`).getTime();
+
+// Einen Tag als krank markieren oder die Markierung wegnehmen
+function setSick(k, on) {
+  const set = new Set(sickDays());
+  if (on) set.add(k);
+  else set.delete(k);
+  state.settings.sickDays = [...set].sort();
+  saveSettings();
+  const view = $('#view');
+  const top = view.scrollTop;
+  render();
+  view.scrollTop = top;
+}
+
+// Zählt die markierten Tage in einem Zeitraum: alle und die an Werktagen (Mo–Fr, ohne Feiertage in NRW)
+function sickCount(from, to) {
+  let all = 0;
+  let work = 0;
+  const hol = new Map();
+  for (const k of sickDays()) {
+    const ts = keyToTs(k);
+    if (ts < from || ts >= to) continue;
+    all++;
+    const y = new Date(ts).getFullYear();
+    if (!hol.has(y)) hol.set(y, holidaysNRW(y));
+    const wd = new Date(ts).getDay();
+    if (wd !== 0 && wd !== 6 && !hol.get(y).has(k)) work++;
+  }
+  return { all, work };
+}
+
+// Aufeinanderfolgende Tage zusammenfassen: "03.11.–05.11.2026 (3 Tage)"
+function sickRanges(from, to) {
+  const list = sickDays().map(keyToTs).filter((ts) => ts >= from && ts < to).sort((a, b) => a - b);
+  const out = [];
+  for (const ts of list) {
+    const last = out[out.length - 1];
+    if (last && M.addDays(last.to, 1) === ts) {
+      last.to = ts;
+      last.n++;
+    } else out.push({ from: ts, to: ts, n: 1 });
+  }
+  return out;
+}
+
+function viewSick() {
+  const t = now();
+  const { y, m } = ui.sickMonth;
+  const sick = new Set(sickDays());
+  const hol = holidaysNRW(y);
+  const first = new Date(y, m, 1).getTime();
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const offset = (new Date(y, m, 1).getDay() + 6) % 7;
+  const todayKey = M.dayKey(t);
+
+  let cells = '<span></span>'.repeat(offset);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ts = M.addDays(first, d - 1);
+    const k = M.dayKey(ts);
+    const wd = new Date(ts).getDay();
+    const isSick = sick.has(k);
+    const worked = sumRange(t, ts, M.addDays(ts, 1)) > 0;
+    const off = wd === 0 || wd === 6 || hol.has(k);
+    const label = `${M.fmtDate(ts)}${hol.has(k) ? `, ${hol.get(k)}` : ''}${isSick ? ', als krank markiert' : ''}${worked ? ', Arbeitszeit erfasst' : ''}`;
+    cells += `<button class="cal-day ${isSick ? 'sick' : ''} ${off ? 'off' : ''} ${k === todayKey ? 'today' : ''}" data-act="sickToggle" data-day="${k}" aria-pressed="${isSick}" aria-label="${esc(label)}" title="${esc(label)}">
+      <span class="cal-num">${d}</span><span class="cal-mark">${isSick ? 'krank' : worked ? '●' : ''}</span></button>`;
+  }
+
+  const yearFrom = new Date(y, 0, 1).getTime();
+  const yearTo = new Date(y + 1, 0, 1).getTime();
+  const cy = sickCount(yearFrom, yearTo);
+  const sjPer = period('schuljahr', first);
+  const sj = sickCount(sjPer.from, sjPer.to);
+  const ranges = sickRanges(yearFrom, yearTo);
+  const dm = (ts) => `${M.pad(new Date(ts).getDate())}.${M.pad(new Date(ts).getMonth() + 1)}.`;
+
+  return `<h2 class="page-title">Berichte</h2>
+  ${repModeChips()}
+  <p class="muted small">Tippe auf einen Tag, um ihn als krank zu markieren. Noch einmal tippen nimmt die Markierung wieder weg. Es wird sofort gespeichert.</p>
+  <section class="card">
+    <div class="month-switch">
+      <button class="icon-btn" data-act="sickMonth" data-d="-1" aria-label="Monat zurück">‹</button>
+      <strong>${M.MONTHS[m]} ${y}</strong>
+      <button class="icon-btn" data-act="sickMonth" data-d="1" aria-label="Monat vor">›</button>
+    </div>
+    <div class="cal cal-head">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((w) => `<span>${w}</span>`).join('')}</div>
+    <div class="cal">${cells}</div>
+    <p class="muted small">● = an dem Tag ist Arbeitszeit erfasst. Wochenenden und Feiertage sind blasser.</p>
+  </section>
+  <section class="card"><h2>Gezählt</h2>
+    <div class="tax-row"><span class="tax-name">Kalenderjahr ${y}${cy.all !== cy.work ? `<small>davon ${nDays(cy.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(cy.all)}</b></div>
+    <div class="tax-row"><span class="tax-name">${esc(sjPer.label)}${sj.all !== sj.work ? `<small>davon ${nDays(sj.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(sj.all)}</b></div>
+  </section>
+  ${
+    ranges.length
+      ? `<section class="card"><h2>Krankentage ${y}</h2>${ranges
+          .map((r) => `<div class="tax-row"><span class="tax-name">${r.n === 1 ? M.fmtDate(r.from) : `${dm(r.from)}–${dm(r.to)}${new Date(r.to).getFullYear()}`}</span><b>${nDays(r.n)}</b></div>`)
+          .join('')}</section>`
+      : ''
+  }`;
+}
+
+const nDays = (n) => `${n} ${n === 1 ? 'Tag' : 'Tage'}`;
+
+// Übersicht für die Steuererklärung: an wie vielen Tagen wurde an welchem Ort gearbeitet?
+function viewTax() {
+  const t = now();
+  const per = period(ui.taxKind, ui.taxAnchor);
+  const tax = taxReport(state.blocks, per, t, M.placeOf);
+  const order = M.placeIds();
+  const places = [...tax.places].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  const homeNames = M.allPlaces().filter((p) => p.home).map((p) => p.name);
+  const sick = new Set(showSick() ? sickDays() : []);
+  const sickN = showSick() ? sickCount(per.from, per.to) : { all: 0, work: 0 };
+
+  const head = `<h2 class="page-title">Berichte</h2>
+  ${repModeChips()}
+  <div class="chips">
+    <button class="chip ${ui.taxKind === 'jahr' ? 'on' : ''}" data-act="taxKind" data-kind="jahr">Kalenderjahr</button>
+    <button class="chip ${ui.taxKind === 'schuljahr' ? 'on' : ''}" data-act="taxKind" data-kind="schuljahr">Schuljahr</button>
+  </div>
+  <div class="month-switch">
+    <button class="icon-btn" data-act="taxShift" data-d="-1" aria-label="Ein Jahr zurück">‹</button>
+    <strong>${esc(per.label)}</strong>
+    <button class="icon-btn" data-act="taxShift" data-d="1" aria-label="Ein Jahr vor">›</button>
+  </div>
+  ${sickSwitch()}`;
+
+  if (!tax.totalDays) {
+    return `${head}${sickN.all ? `<section class="card">${sickLine(sickN)}</section>` : ''}
+    <p class="muted empty">Für diesen Zeitraum (${esc(per.label)}) gibt es noch keine erfassten Zeiten.</p>`;
+  }
+
+  const rows = places
+    .map((p) => {
+      const sub = [];
+      if (p.offDays) sub.push(`davon ${nDays(p.offDays)} am Wochenende oder Feiertag`);
+      return `<div class="tax-row place-${p.id}">
+        <span class="dot"></span>
+        <span class="tax-name">${M.placeOf(p.id).icon} ${esc(p.name)}${sub.length ? `<small>${sub.join(' · ')}</small>` : ''}</span>
+        <b>${nDays(p.days)}</b>
+      </div>`;
+    })
+    .join('');
+
+  // Welche Orte kamen am selben Tag zusammen vor? (Hilft beim Zählen der Wege: zwei Orte an einem Tag)
+  const comboCount = new Map();
+  for (const m of tax.months) {
+    for (const d of m.days) {
+      if (!d.places.length) continue;
+      const ids = [...d.places].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+      const key = ids.join('|');
+      if (!comboCount.has(key)) comboCount.set(key, { ids, n: 0 });
+      comboCount.get(key).n++;
+    }
+  }
+  const comboList = [...comboCount.values()].sort((a, b) => b.n - a.n);
+  const combos = comboList.some((c) => c.ids.length > 1)
+    ? `<section class="card"><h2>So verteilen sich die Tage</h2>
+        ${comboList
+          .map(
+            (c) => `<div class="tax-row"><span class="tax-name">${c.ids.length === 1 ? 'Nur ' : ''}${c.ids.map((id) => `${M.placeOf(id).icon} ${esc(placeName(id))}`).join(' + ')}</span><b>${nDays(c.n)}</b></div>`
+          )
+          .join('')}
+        <p class="muted small">Hier zählt jeder Tag genau einmal. Du siehst, an wie vielen Tagen du nur an einem Ort warst und an wie vielen an mehreren.</p>
+      </section>`
+    : '';
+
+  const home = homeNames.length
+    ? `<section class="card"><h2>Zu Hause gearbeitet</h2>
+        <div class="tax-row"><span class="tax-name">Nur zu Hause gearbeitet</span><b>${nDays(tax.homeOnly)}</b></div>
+        <div class="tax-row"><span class="tax-name">Zu Hause und am selben Tag an einem anderen Ort</span><b>${nDays(tax.homeMixed)}</b></div>
+        <p class="muted small">Als „zu Hause“ zählt: ${esc(homeNames.join(', '))}. Das lässt sich in den Einstellungen beim Arbeitsort ändern.</p>
+      </section>`
+    : '';
+
+  const months = tax.months
+    .map(
+      (m) => `<details class="tax-month"><summary><span>${esc(m.label)}</span><span class="muted">${nDays(m.worked)} mit Arbeit</span></summary>
+        ${m.days
+          .map((d) => {
+            const isSick = sick.has(M.dayKey(d.ts));
+            const what = d.places.length
+              ? d.places.map((id) => `<span class="place-${id}"><span class="dot"></span> ${esc(placeName(id))}</span>`).join(' ')
+              : isSick
+                ? '<span class="sick-tag">krank</span>'
+                : `<span class="muted">${d.holiday ? esc(d.holiday) : d.weekend ? 'Wochenende' : 'keine Erfassung'}</span>`;
+            const extra = `${d.places.length && d.holiday ? ` <span class="muted">(${esc(d.holiday)})</span>` : ''}${d.places.length && isSick ? ' <span class="sick-tag">krank</span>' : ''}`;
+            return `<div class="tax-day ${d.places.length ? '' : 'none'} ${d.weekend || d.holiday ? 'off' : ''}"><span class="tax-date">${M.fmtDateShort(d.ts)}</span><span>${what}${extra}</span></div>`;
+          })
+          .join('')}
+      </details>`
+    )
+    .join('');
+
+  return `${head}
+  <p class="note-box">Gezählt wird jeder Tag, an dem du an dem Ort Arbeitszeit erfasst hast. Tage ohne Erfassung zählen nicht mit, also auch keine freien Wochenenden, Feiertage und Ferientage. Die App zählt nur. Was du in der Steuererklärung angibst, entscheidest du.</p>
+  <section class="summary"><span>Tage mit erfasster Arbeit</span><b>${nDays(tax.totalDays)}</b></section>
+  <section class="card"><h2>Tage je Arbeitsort</h2>${rows}
+    <p class="muted small">Hast du an einem Tag an zwei Orten gearbeitet, zählt der Tag bei beiden Orten. Oben bei „Tage mit erfasster Arbeit“ zählt er nur einmal. Deshalb kann die Summe der Orte größer sein als die Zahl oben.</p></section>
+  ${combos}
+  ${home}
+  ${
+    sickN.all
+      ? `<section class="card"><h2>Krankentage</h2>${sickLine(sickN)}</section>`
+      : ''
+  }
+  <section class="card"><h2>Alle Tage im Überblick</h2>
+    <p class="muted small">Tippe auf einen Monat, um die einzelnen Tage zu sehen.</p>
+    ${months}</section>`;
+}
+
 function viewReport() {
+  if (ui.repMode === 'steuer') return viewTax();
+  if (ui.repMode === 'krank') return viewSick();
   const rep = currentReport();
   lastRep = rep;
   const share = canShareFiles();
@@ -465,12 +747,15 @@ function viewReport() {
     <button class="btn small" data-act="exp" data-kind="${kind}" data-mode="save">Herunterladen</button>
     ${share ? `<button class="btn small" data-act="exp" data-kind="${kind}" data-mode="share">Teilen</button>` : ''}</div>`;
   const where = rep.all ? '' : ` am Arbeitsort „${esc(rep.placeName)}“`;
+  const sickN = showSick() ? sickCount(rep.period.from, rep.period.to) : { all: 0, work: 0 };
+  const sickCard = sickN.all ? `<section class="card">${sickLine(sickN)}</section>` : '';
 
   let body;
   if (!rep.rows.length) {
-    body = `<p class="muted empty">Für diesen Zeitraum (${esc(rep.label)}) gibt es noch keine Zeiten${where}.</p>`;
+    body = `${sickCard}<p class="muted empty">Für diesen Zeitraum (${esc(rep.label)}) gibt es noch keine Zeiten${where}.</p>`;
   } else {
     body = `<section class="summary"><span>${esc(rep.period.sumLabel.replace(' (ohne Pausen)', ''))}${rep.all ? '' : `<br><small>${esc(rep.placeName)}</small>`}</span><b>${M.fmtDur(rep.totalMs)} Std.</b></section>
+    ${sickCard}
     ${
       rep.all
         ? `<section class="card"><h2>Nach Arbeitsort</h2>
@@ -486,12 +771,22 @@ function viewReport() {
   }
 
   return `<h2 class="page-title">Berichte</h2>
+  ${repModeChips()}
   ${repControls(rep.period)}
+  ${sickSwitch()}
   ${rep.openCount ? `<p class="note-box">Ein Arbeitsblock läuft noch. Er ist bis jetzt (${M.fmtTime(now())} Uhr) mitgezählt.</p>` : ''}
   ${body}`;
 }
 
 // ---------- Bildschirm: Einstellungen ----------
+
+const placeRow = (p) => `<button class="item place-${p.id} ${p.hidden ? 'is-hidden' : ''}" data-act="placeEdit" data-id="${p.id}">
+    <span class="item-main">
+      <span class="item-title">${p.icon} ${esc(p.name)}</span>
+      <span class="item-sub">${p.categories.length} ${p.categories.length === 1 ? 'Kategorie' : 'Kategorien'}${p.detailed ? ' · ausführlicher Bericht' : ''}</span>
+    </span>
+    <span class="ev-edit">ändern ›</span>
+  </button>`;
 
 function viewSettings() {
   const s = state.settings;
@@ -502,11 +797,17 @@ function viewSettings() {
     <input id="set-name" type="text" data-input="set" data-key="userName" value="${esc(s.userName)}" autocomplete="name" placeholder="Vorname Nachname">
   </section>
   <section class="card">
-    <h2>Namen der Arbeitsorte</h2>
-    ${M.PLACE_IDS.map(
-      (id) => `<label class="label place-${id}" for="set-${id}"><span class="dot"></span> ${M.PLACE_META[id].icon} ${M.PLACE_META[id].defaultName}</label>
-      <input id="set-${id}" type="text" data-input="set" data-key="place:${id}" value="${esc(s.places[id].name)}" maxlength="40">`
-    ).join('')}
+    <h2>Arbeitsorte und Kategorien</h2>
+    <p class="muted small">Tippe auf einen Arbeitsort, um Namen, Farbe und Kategorien zu ändern.</p>
+    ${M.visiblePlaces().map(placeRow).join('')}
+    <button class="btn" data-act="placeAdd">＋ Arbeitsort hinzufügen</button>
+    ${
+      M.allPlaces().some((p) => p.hidden)
+        ? `<h2 class="sub">Archiv</h2>
+           <p class="muted small">Diese Arbeitsorte werden nicht mehr zur Auswahl angeboten. Ihre Zeiten stehen weiter in den Berichten.</p>
+           ${M.allPlaces().filter((p) => p.hidden).map(placeRow).join('')}`
+        : ''
+    }
   </section>
   <section class="card">
     <h2>Hinweise beim Öffnen</h2>
@@ -577,10 +878,35 @@ function sheetErr(msg) {
 const ERR = '<p class="error" id="sheet-err" hidden></p>';
 const CANCEL = '<button class="btn ghost" data-act="closeSheet">Abbrechen</button>';
 
-function sheetPlaces() {
-  openSheet(
+// Erster Start: Es gibt noch keinen Arbeitsort. Vorlagen zum Antippen oder ein eigener Ort.
+function starterHtml() {
+  const have = M.placeIds();
+  const tpl = M.placeTemplates().filter((p) => !have.includes(p.id));
+  return `<p>${
+    have.length
+      ? 'Du kannst weitere Vorlagen antippen oder einen eigenen Ort anlegen. Später geht das jederzeit unter „Einstellungen“.'
+      : 'Lege zuerst deine Arbeitsorte an. Du kannst eine Vorlage antippen oder einen eigenen Ort anlegen. Namen, Farben und Kategorien lassen sich später jederzeit unter „Einstellungen“ ändern.'
+  }</p>
+    ${tpl.map((p) => `<button class="btn" data-act="tplAdd" data-id="${p.id}">${p.icon} ${esc(p.name)} anlegen</button>`).join('')}
+    <button class="btn" data-act="tplOwn">＋ Eigenen Arbeitsort anlegen</button>`;
+}
+
+// Inhalt des offenen Fensters austauschen, ohne es zu schließen und neu zu öffnen
+function swapSheet(html, meta) {
+  ui.sheet = meta || { type: 'plain' };
+  $('#sheet').innerHTML = html;
+  $('#sheet').scrollTop = 0;
+}
+
+// swap = true: Es ist schon ein Fenster offen, dessen Inhalt ersetzt wird.
+function sheetPlaces(swap) {
+  const show = swap ? swapSheet : openSheet;
+  if (!M.visiblePlaces().length) {
+    return show(`<h2>Noch kein Arbeitsort</h2>${starterHtml()}${CANCEL}`);
+  }
+  show(
     `<h2>Wo arbeitest du?</h2>
-    <div class="place-grid">${M.PLACE_IDS.map((id) => `<button class="place-btn place-${id}" data-act="pickPlace" data-place="${id}"><span class="place-icon">${M.PLACE_META[id].icon}</span>${esc(placeName(id))}</button>`).join('')}</div>
+    <div class="place-grid">${M.visiblePlaces().map((p) => `<button class="place-btn place-${p.id}" data-act="pickPlace" data-place="${p.id}"><span class="place-icon">${p.icon}</span>${esc(p.name)}</button>`).join('')}</div>
     ${CANCEL}`
   );
 }
@@ -642,13 +968,14 @@ function sheetAddEnd(b) {
 }
 
 function sheetManual() {
+  if (!M.visiblePlaces().length) return sheetPlaces();
   const t = now();
   const sameMonth = ui.histMonth.y === new Date(t).getFullYear() && ui.histMonth.m === new Date(t).getMonth();
   const day = sameMonth ? M.dayKey(t) : M.dayKey(new Date(ui.histMonth.y, ui.histMonth.m, 1).getTime());
   openSheet(
     `<h2>Arbeitsblock nachtragen</h2>
     <label class="label">Arbeitsort</label>
-    <div class="place-chips" id="m-places">${M.PLACE_IDS.map((id, i) => `<button class="chip place-${id} ${i === 0 ? 'on' : ''}" data-act="manualPlace" data-place="${id}">${placeLabel(id)}</button>`).join('')}</div>
+    <div class="place-chips" id="m-places">${M.visiblePlaces().map(({ id }, i) => `<button class="chip place-${id} ${i === 0 ? 'on' : ''}" data-act="manualPlace" data-place="${id}">${placeLabel(id)}</button>`).join('')}</div>
     <label class="label">Tag<input type="date" id="m-date" value="${day}"></label>
     <div class="field-row">
       <label class="label">Beginn<input type="time" id="m-von"></label>
@@ -662,8 +989,117 @@ function sheetManual() {
     ${ERR}
     <button class="btn primary" data-act="manualSave">Eintragen</button>
     ${CANCEL}`,
-    { type: 'manual', place: M.PLACE_IDS[0] }
+    { type: 'manual', place: M.visiblePlaces()[0].id }
   );
+}
+
+// Arbeitsort bearbeiten: Name, Symbol, Farbe, Kategorien, Art des Berichts
+// Rückfrage vor dem Entfernen einer Kategorie oder dem Löschen eines Arbeitsorts
+function placeConfirmHtml(p, c) {
+  const back = '<button class="btn ghost" data-act="confirmNo">Abbrechen</button>';
+  if (c.kind === 'cat') {
+    const name = p.categories[c.i];
+    const n = state.blocks.filter((b) => b.place === p.id && b.category === name).length;
+    return `<h2>Kategorie „${esc(name)}“ entfernen?</h2>
+      <p>${
+        n
+          ? `Sie wurde bei <b>${n} ${n === 1 ? 'Arbeitsblock' : 'Arbeitsblöcken'}</b> verwendet. Diese Einträge behalten die Kategorie und erscheinen damit weiter in den Berichten.`
+          : 'Sie wurde bisher bei keinem Arbeitsblock verwendet.'
+      }</p>
+      <p class="muted">Die Kategorie wird nur nicht mehr zur Auswahl angeboten. Du kannst sie jederzeit neu anlegen.</p>
+      <button class="btn danger" data-act="catDelYes">Ja, entfernen</button>
+      ${back}`;
+  }
+  const mine = state.blocks.filter((b) => b.place === p.id);
+  const t = now();
+  if (mine.some((b) => M.stateOf(b) !== 'done')) {
+    return `<h2>Löschen geht gerade nicht</h2>
+      <p>An diesem Arbeitsort läuft noch die Uhr. Bitte drücke zuerst auf „Stopp“.</p>
+      ${back}`;
+  }
+  if (!mine.length) {
+    return `<h2>Arbeitsort „${esc(p.name)}“ löschen?</h2>
+      <p>Zu diesem Arbeitsort gibt es keine gespeicherten Zeiten. Es geht also nichts verloren.</p>
+      <button class="btn danger" data-act="placeDelYes">Ja, löschen</button>
+      ${back}`;
+  }
+  const ms = mine.reduce((s, b) => s + M.netMs(b, t), 0);
+  return `<h2>Achtung: „${esc(p.name)}“ mit allen Zeiten löschen?</h2>
+    <p class="note-box">Damit werden auch <b>${mine.length} ${mine.length === 1 ? 'Arbeitsblock' : 'Arbeitsblöcke'} mit zusammen ${M.fmtDur(ms)} Stunden</b> gelöscht. Sie verschwinden aus allen Berichten. Das lässt sich nicht rückgängig machen.</p>
+    ${
+      !p.hidden && M.visiblePlaces().length > 1
+        ? `<p>Wenn du den Ort nur nicht mehr in der Auswahl sehen möchtest, verschiebe ihn besser ins Archiv. Dann bleiben die Zeiten erhalten, und du kannst ihn später zurückholen.</p>
+           <button class="btn primary" data-act="placeHide">Lieber ins Archiv verschieben</button>`
+        : '<p>Im Archiv bleiben die Zeiten erhalten. Löschen brauchst du nur, wenn die Zeiten wirklich weg sollen.</p>'
+    }
+    <button class="btn danger" data-act="placeDelYes">Trotzdem alles löschen</button>
+    ${back}`;
+}
+
+function placeSheetHtml(p) {
+  if (ui.sheet && ui.sheet.confirm) return placeConfirmHtml(p, ui.sheet.confirm);
+  const visibleCount = M.visiblePlaces().length;
+  // Löschen geht nur, wenn danach noch mindestens ein Arbeitsort zur Auswahl steht
+  const canDelete = M.visiblePlaces().some((x) => x !== p);
+  const cats = p.categories
+    .map(
+      (c, i) => `<div class="cat-row">
+        <input type="text" data-change="catName" data-i="${i}" value="${esc(c)}" maxlength="30" autocomplete="off" aria-label="Name der Kategorie">
+        <button class="icon-btn ${i === 0 ? 'star-on' : ''}" data-act="catDefault" data-i="${i}" aria-label="${i === 0 ? 'Ist der Standard' : 'Als Standard festlegen'}">${i === 0 ? '★' : '☆'}</button>
+        <button class="icon-btn" data-act="catDel" data-i="${i}" aria-label="Kategorie entfernen">✕</button>
+      </div>`
+    )
+    .join('');
+  return `<h2>Arbeitsort bearbeiten</h2>
+    <label class="label">Name<input type="text" data-input="placeName" value="${esc(p.name)}" maxlength="40" autocomplete="off"></label>
+    <label class="label">Symbol</label>
+    <div class="chips">${M.ICONS.map((ic) => `<button class="chip icon-chip ${ic === p.icon ? 'on' : ''}" data-act="placeIcon" data-icon="${ic}">${ic}</button>`).join('')}</div>
+    <label class="label">Farbe</label>
+    <div class="chips">${M.COLOR_NAMES.map((name, i) => `<button class="swatch ${i === p.color ? 'on' : ''}" style="--pc:var(--c${i})" data-act="placeColor" data-color="${i}" aria-label="${name}" title="${name}"></button>`).join('')}</div>
+    <h2 class="sub">Kategorien</h2>
+    <p class="muted small">Die Kategorie mit dem Stern ★ ist beim Start automatisch gewählt. Am übersichtlichsten bleibt es mit höchstens 6 bis 8 Kategorien.</p>
+    ${cats}
+    <div class="cat-row">
+      <input type="text" id="cat-new" placeholder="Neue Kategorie" maxlength="30" autocomplete="off" enterkeyhint="done">
+      <button class="btn small" data-act="catAdd">Hinzufügen</button>
+    </div>
+    <h2 class="sub">Bericht</h2>
+    <label class="check"><input type="checkbox" data-change="placeFlag" data-key="detailed" ${p.detailed ? 'checked' : ''}>
+      <span>Ausführlicher Bericht: Jeder Abschnitt zwischen zwei Pausen bekommt eine eigene Zeile und eine eigene Notiz. Beim Stopp erinnert die App an fehlende Notizen.</span></label>
+    <label class="check"><input type="checkbox" data-change="placeFlag" data-key="home" ${p.home ? 'checked' : ''}>
+      <span>Das ist mein Arbeitsplatz zu Hause. Tage an diesem Ort zählen in der Übersicht für die Steuer als „zu Hause gearbeitet“.</span></label>
+    ${ERR}
+    <button class="btn primary" data-act="sheetDone">Fertig</button>
+    ${
+      p.hidden
+        ? `<button class="btn" data-act="placeHide">Aus dem Archiv zurückholen</button>`
+        : visibleCount > 1
+          ? `<button class="btn" data-act="placeHide">Ins Archiv verschieben</button>
+             <p class="muted small center">Im Archiv wird der Ort nicht mehr zur Auswahl angeboten. Alle Zeiten bleiben erhalten, und du kannst ihn jederzeit zurückholen.</p>`
+          : ''
+    }
+    ${canDelete ? `<button class="btn danger-ghost" data-act="placeDel">Arbeitsort löschen …</button>` : ''}`;
+}
+
+function sheetPlace(p) {
+  openSheet(placeSheetHtml(p), { type: 'place', id: p.id });
+}
+
+// Das offene Fenster neu aufbauen, ohne es zu schließen
+function refreshPlaceSheet() {
+  const p = sheetPlaceObj();
+  if (!p) return;
+  const sheet = $('#sheet');
+  const top = sheet.scrollTop;
+  sheet.innerHTML = placeSheetHtml(p);
+  sheet.scrollTop = top;
+}
+
+const sheetPlaceObj = () => (ui.sheet && ui.sheet.type === 'place' ? M.allPlaces().find((p) => p.id === ui.sheet.id) : null);
+
+function placesChanged() {
+  applyPlaceColors();
+  saveSettings();
 }
 
 function sheetNotes(b) {
@@ -727,7 +1163,19 @@ const actions = {
 
   start() {
     if (openBlock()) return render();
+    // Heute als krank markiert? Dann lieber kurz nachfragen, damit kein Widerspruch entsteht.
+    if (sickDays().includes(M.dayKey(now()))) {
+      return openSheet(
+        `<h2>Heute bist du als krank markiert</h2>
+        <p>Hast du heute trotzdem gearbeitet, zum Beispiel im Homeoffice? Dann kannst du die Arbeitszeit ganz normal erfassen. Die Markierung „krank“ bleibt dabei bestehen.</p>
+        <button class="btn primary" data-act="startAnyway">Ja, Arbeitszeit erfassen</button>
+        ${CANCEL}`
+      );
+    }
     sheetPlaces();
+  },
+  startAnyway() {
+    sheetPlaces(true);
   },
 
   pickPlace(el) {
@@ -919,7 +1367,7 @@ const actions = {
     const place = el.dataset.place;
     if (!b || b.place === place) return;
     b.place = place;
-    b.category = M.PLACE_META[place].defaultCategory;
+    b.category = M.defaultCategory(place);
     saveBlock(b);
     render();
   },
@@ -980,6 +1428,11 @@ const actions = {
     b.events.push({ t: 'stopp', ts: z });
     const err = M.validate(b, now());
     if (err) return sheetErr(err);
+    // Der Tag ist als krank markiert: einmal nachfragen, beim zweiten Tippen wird eingetragen
+    if (sickDays().includes(date) && ui.sheet.sickOk !== date) {
+      ui.sheet.sickOk = date;
+      return sheetErr('Dieser Tag ist als krank markiert. Wenn du trotzdem gearbeitet hast, tippe noch einmal auf „Eintragen“. Die Markierung „krank“ bleibt bestehen.');
+    }
     state.blocks.push(b);
     saveBlock(b);
     store.askPersistent();
@@ -1038,16 +1491,202 @@ const actions = {
     render();
   },
 
+  // --- Erster Start: Arbeitsort aus einer Vorlage oder selbst anlegen ---
+  tplAdd(el) {
+    const p = M.placeTemplates().find((x) => x.id === el.dataset.id);
+    if (!p || M.placeIds().includes(p.id)) return;
+    state.settings.places.push(p);
+    placesChanged();
+    if (ui.sheet) closeSheet();
+    render();
+    toast(`„${p.name}“ ist angelegt.`);
+  },
+  tplOwn() {
+    if (ui.sheet) closeSheet();
+    ui.tab = 'set';
+    // Kurz warten, bis das alte Fenster ganz geschlossen ist
+    setTimeout(() => actions.placeAdd(), 60);
+  },
+
+  // --- Arbeitsorte und ihre Kategorien bearbeiten ---
+  placeEdit(el) {
+    const p = M.allPlaces().find((x) => x.id === el.dataset.id);
+    if (p) sheetPlace(p);
+  },
+  placeAdd() {
+    const p = M.newPlace();
+    state.settings.places.push(p);
+    placesChanged();
+    render();
+    sheetPlace(p);
+    const name = $('#sheet input[data-input="placeName"]');
+    if (name) {
+      name.focus();
+      name.select();
+    }
+  },
+  placeIcon(el) {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    p.icon = el.dataset.icon;
+    placesChanged();
+    refreshPlaceSheet();
+  },
+  placeColor(el) {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    p.color = Number(el.dataset.color);
+    placesChanged();
+    refreshPlaceSheet();
+  },
+  // Ins Archiv verschieben oder zurückholen
+  placeHide() {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    ui.sheet.confirm = null;
+    if (!p.hidden && M.visiblePlaces().length <= 1) {
+      refreshPlaceSheet();
+      return sheetErr('Mindestens ein Arbeitsort muss zur Auswahl bleiben.');
+    }
+    p.hidden = !p.hidden;
+    if (p.hidden && ui.rep.place === p.id) ui.rep.place = 'all';
+    placesChanged();
+    refreshPlaceSheet();
+    toast(p.hidden ? 'Der Arbeitsort liegt jetzt im Archiv.' : 'Der Arbeitsort ist wieder in der Auswahl.');
+  },
+  // Löschen: erst die Rückfrage zeigen
+  placeDel() {
+    if (!sheetPlaceObj()) return;
+    ui.sheet.confirm = { kind: 'place' };
+    refreshPlaceSheet();
+    $('#sheet').scrollTop = 0;
+  },
+  placeDelYes() {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    const mine = state.blocks.filter((b) => b.place === p.id);
+    const canDelete = M.visiblePlaces().some((x) => x !== p);
+    if (!canDelete || mine.some((b) => M.stateOf(b) !== 'done')) {
+      ui.sheet.confirm = null;
+      return refreshPlaceSheet();
+    }
+    state.blocks = state.blocks.filter((b) => b.place !== p.id);
+    for (const b of mine) store.deleteBlock(b.id).catch(saveFailed);
+    const list = state.settings.places;
+    list.splice(list.indexOf(p), 1);
+    if (ui.rep.place === p.id) ui.rep.place = 'all';
+    placesChanged();
+    closeSheet();
+    render();
+    toast(mine.length ? 'Arbeitsort und seine Zeiten gelöscht.' : 'Arbeitsort gelöscht.');
+  },
+  confirmNo() {
+    if (!ui.sheet) return;
+    ui.sheet.confirm = null;
+    refreshPlaceSheet();
+  },
+  catAdd() {
+    const p = sheetPlaceObj();
+    const input = $('#cat-new');
+    if (!p || !input) return;
+    const name = input.value.trim();
+    if (!name) return sheetErr('Bitte zuerst einen Namen für die neue Kategorie eintippen.');
+    if (p.categories.some((c) => c.toLowerCase() === name.toLowerCase())) return sheetErr(`Die Kategorie „${name}“ gibt es hier schon.`);
+    p.categories.push(name);
+    placesChanged();
+    refreshPlaceSheet();
+  },
+  catDefault(el) {
+    const p = sheetPlaceObj();
+    const i = Number(el.dataset.i);
+    if (!p || i <= 0 || i >= p.categories.length) return;
+    p.categories.unshift(p.categories.splice(i, 1)[0]);
+    placesChanged();
+    refreshPlaceSheet();
+  },
+  // Kategorie entfernen: erst die Rückfrage zeigen
+  catDel(el) {
+    const p = sheetPlaceObj();
+    const i = Number(el.dataset.i);
+    if (!p || !(i >= 0 && i < p.categories.length)) return;
+    if (p.categories.length <= 1) return sheetErr('Mindestens eine Kategorie muss bleiben.');
+    ui.sheet.confirm = { kind: 'cat', i };
+    refreshPlaceSheet();
+    $('#sheet').scrollTop = 0;
+  },
+  catDelYes() {
+    const p = sheetPlaceObj();
+    const c = ui.sheet && ui.sheet.confirm;
+    if (!p || !c || c.kind !== 'cat') return;
+    if (p.categories.length > 1) p.categories.splice(c.i, 1);
+    ui.sheet.confirm = null;
+    placesChanged();
+    refreshPlaceSheet();
+  },
+
   // --- Kategorie ---
+  // „Weitere“ klappt die übrigen Kategorien auf und wieder zu
+  catMore(el) {
+    const open = ui.catsOpen !== el.dataset.id;
+    ui.catsOpen = open ? el.dataset.id : null;
+    el.textContent = open ? 'Weniger ▴' : 'Weitere ▾';
+    el.setAttribute('aria-expanded', String(open));
+    const wrap = el.parentElement.nextElementSibling;
+    if (wrap) wrap.classList.toggle('open', open);
+  },
+
   setCat(el) {
     const b = byId(el.dataset.id);
     if (!b) return;
+    ui.catsOpen = null;
     b.category = el.dataset.cat;
     saveBlock(b);
     render();
   },
 
   // --- Berichte ---
+  repMode(el) {
+    ui.repMode = el.dataset.mode;
+    render();
+    $('#view').scrollTop = 0;
+  },
+  taxKind(el) {
+    ui.taxKind = el.dataset.kind;
+    render();
+  },
+  // --- Krankentage ---
+  sickMonth(el) {
+    const d = new Date(ui.sickMonth.y, ui.sickMonth.m + Number(el.dataset.d), 1);
+    ui.sickMonth = { y: d.getFullYear(), m: d.getMonth() };
+    render();
+  },
+  sickToggle(el) {
+    const k = el.dataset.day;
+    const adding = !sickDays().includes(k);
+    const ts = keyToTs(k);
+    const worked = adding ? sumRange(now(), ts, M.addDays(ts, 1)) : 0;
+    // An dem Tag ist schon Arbeitszeit erfasst: erst nachfragen
+    if (worked > 0) {
+      return openSheet(
+        `<h2>An diesem Tag hast du gearbeitet</h2>
+        <p>Am ${M.fmtDate(ts)} sind <b>${M.fmtDur(worked)} Stunden</b> Arbeitszeit erfasst. Möchtest du den Tag trotzdem als krank markieren?</p>
+        <p class="muted">Die erfasste Arbeitszeit bleibt dabei unverändert.</p>
+        <button class="btn primary" data-act="sickYes">Ja, als krank markieren</button>
+        ${CANCEL}`,
+        { type: 'sick', day: k }
+      );
+    }
+    setSick(k, adding);
+  },
+  sickYes() {
+    const k = ui.sheet && ui.sheet.day;
+    closeSheet();
+    if (k) setSick(k, true);
+  },
+  taxShift(el) {
+    ui.taxAnchor = shiftAnchor(ui.taxKind, ui.taxAnchor, Number(el.dataset.d));
+    render();
+  },
   repKind(el) {
     const kind = el.dataset.kind;
     if (kind === 'frei' && ui.rep.kind !== 'frei') {
@@ -1075,9 +1714,9 @@ const actions = {
     const c = lastRep && lastRep.series[Number(el.dataset.i)];
     const out = $('#col-info');
     if (!c || !out) return;
-    const ids = lastRep.all ? M.PLACE_IDS.filter((id) => c.parts[id] > 0) : [];
+    const ids = lastRep.all ? M.placeIds().filter((id) => c.parts[id] > 0) : [];
     const parts = ids.length > 1 ? ` (${ids.map((id) => `${placeName(id)} ${M.fmtDur(c.parts[id])}`).join(' · ')})` : ids.length === 1 ? ` (${placeName(ids[0])})` : '';
-    out.textContent = `${c.full}: ${M.fmtDur(c.ms)} Std.${parts}`;
+    out.textContent = `${c.full}: ${M.fmtDur(c.ms)} Std.${parts}${c.sick ? ` · ${nDays(c.sick)} krank markiert` : ''}`;
     out.classList.remove('muted');
     document.querySelectorAll('.cols .col').forEach((x) => x.classList.toggle('on', x === el));
     el.parentElement.classList.add('picked');
@@ -1131,14 +1770,18 @@ const inputs = {
     noteTimer = setTimeout(() => saveBlock(b), 300);
   },
 
+  placeName(el) {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    p.name = el.value.trim().slice(0, 40) || 'Arbeitsort';
+    saveSettings();
+  },
+
   set(el) {
     const key = el.dataset.key;
     const s = state.settings;
     if (key === 'userName') s.userName = el.value.trim();
-    else if (key.startsWith('place:')) {
-      const id = key.slice(6);
-      s.places[id].name = el.value.trim() || M.PLACE_META[id].defaultName;
-    } else {
+    else {
       const n = Number(el.value);
       if (!Number.isFinite(n) || n < 1 || n > 48) return;
       s[key] = n;
@@ -1150,7 +1793,10 @@ const inputs = {
 // ---------- Start ----------
 
 document.addEventListener('click', (e) => {
-  if (e.target.id === 'backdrop') return closeSheet();
+  if (e.target.id === 'backdrop') {
+    closeSheet();
+    return render();
+  }
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const fn = actions[el.dataset.act];
@@ -1163,11 +1809,55 @@ document.addEventListener('input', (e) => {
 });
 
 // Felder, die erst nach fertiger Eingabe wirken (z. B. ein gewähltes Datum)
+const changes = {
+  repDate(el) {
+    if (!el.value) return;
+    ui.rep[el.dataset.key] = el.value;
+    render();
+  },
+
+  // Kategorie umbenennen: Die bisherigen Arbeitsblöcke an diesem Ort bekommen den neuen Namen mit.
+  catName(el) {
+    const p = sheetPlaceObj();
+    const i = Number(el.dataset.i);
+    if (!p || !(i >= 0 && i < p.categories.length)) return;
+    const old = p.categories[i];
+    const name = el.value.trim();
+    if (name === old) return;
+    if (!name || p.categories.some((c, k) => k !== i && c.toLowerCase() === name.toLowerCase())) {
+      el.value = old;
+      return sheetErr(name ? `Die Kategorie „${name}“ gibt es hier schon.` : 'Eine Kategorie braucht einen Namen.');
+    }
+    p.categories[i] = name;
+    for (const b of state.blocks) {
+      if (b.place === p.id && b.category === old) {
+        b.category = name;
+        saveBlock(b);
+      }
+    }
+    saveSettings();
+  },
+
+  showSick(el) {
+    state.settings.showSick = el.checked;
+    saveSettings();
+    const view = $('#view');
+    const top = view.scrollTop;
+    render();
+    view.scrollTop = top;
+  },
+
+  placeFlag(el) {
+    const p = sheetPlaceObj();
+    if (!p) return;
+    p[el.dataset.key] = el.checked;
+    saveSettings();
+  },
+};
+
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-change]');
-  if (!el || el.dataset.change !== 'repDate' || !el.value) return;
-  ui.rep[el.dataset.key] = el.value;
-  render();
+  if (el && changes[el.dataset.change]) changes[el.dataset.change](el);
 });
 
 // Die Zurück-Taste des Handys schließt erst ein Fenster, dann die Detailansicht.
@@ -1195,7 +1885,18 @@ async function init() {
   try {
     const data = await store.load();
     state.blocks = data.blocks.filter((b) => b && Array.isArray(b.events) && b.events.length);
-    state.settings = M.mergeSettings(data.settings);
+    state.settings = M.mergeSettings(data.settings, state.blocks.length > 0);
+    // Sicherheitsnetz: Jeder gespeicherte Arbeitsblock braucht seinen Arbeitsort in der Liste.
+    let repaired = false;
+    for (const b of state.blocks) {
+      if (!state.settings.places.some((p) => p.id === b.place)) {
+        state.settings.places.push(M.repairPlace(b.place));
+        repaired = true;
+      }
+    }
+    M.setPlaces(state.settings.places);
+    applyPlaceColors();
+    if (repaired) saveSettings();
   } catch (err) {
     console.error(err);
     $('#view').innerHTML = '<p class="note-box">Die gespeicherten Daten konnten nicht geladen werden. Bitte schließe die App und öffne sie noch einmal.</p>';

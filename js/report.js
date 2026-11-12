@@ -7,8 +7,8 @@
 // - "Übersicht" (Anforderungen 8.2): eine Zeile pro Arbeitsblock, die Pausen zusammengefasst.
 
 import {
-  DAY, MONTHS, PLACE_IDS, PLACE_META, WEEKDAYS,
-  addDays, blockNotes, blockStart, dayKey, fmtDate, isDetailed, pad, segments, startOfDay, stateOf,
+  DAY, MONTHS, WEEKDAYS,
+  addDays, blockNotes, blockStart, dayKey, defaultCategory, fmtDate, isDetailed, pad, segments, startOfDay, stateOf,
 } from './model.js';
 
 export const PERIOD_KINDS = [
@@ -206,7 +206,7 @@ export function buildReport(blocks, per, place, now, names) {
     }
     totalMs += ms;
     placeMs[b.place] = (placeMs[b.place] || 0) + ms;
-    const category = b.category || PLACE_META[b.place].defaultCategory;
+    const category = b.category || defaultCategory(b.place);
     catMs.set(category, (catMs.get(category) || 0) + ms);
 
     if (detailed) {
@@ -266,7 +266,8 @@ export function buildReport(blocks, per, place, now, names) {
     totalMs,
     openCount,
     blockCount,
-    byPlace: PLACE_IDS.filter((id) => placeMs[id] > 0)
+    byPlace: Object.keys(placeMs)
+      .filter((id) => placeMs[id] > 0)
       .map((id) => ({ id, name: names.place(id), ms: placeMs[id] }))
       .sort((a, b) => b.ms - a.ms),
     byCategory: [...catMs.entries()]
@@ -275,5 +276,123 @@ export function buildReport(blocks, per, place, now, names) {
       .sort((a, b) => b.ms - a.ms),
     series,
     seriesUnit: UNIT(per),
+  };
+}
+
+// ---------- Übersicht für die Steuererklärung (Anforderungen 8.3) ----------
+
+// Ostersonntag eines Jahres (bekannte Rechenvorschrift, braucht kein Internet)
+function easter(y) {
+  const a = y % 19;
+  const b = Math.floor(y / 100);
+  const c = y % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(y, month - 1, day).getTime();
+}
+
+// Gesetzliche Feiertage in Nordrhein-Westfalen: Tag (2026-11-01) -> Name
+export function holidaysNRW(y) {
+  const e = easter(y);
+  const map = new Map();
+  const add = (ts, name) => map.set(dayKey(ts), name);
+  add(new Date(y, 0, 1).getTime(), 'Neujahr');
+  add(addDays(e, -2), 'Karfreitag');
+  add(addDays(e, 1), 'Ostermontag');
+  add(new Date(y, 4, 1).getTime(), 'Tag der Arbeit');
+  add(addDays(e, 39), 'Christi Himmelfahrt');
+  add(addDays(e, 50), 'Pfingstmontag');
+  add(addDays(e, 60), 'Fronleichnam');
+  add(new Date(y, 9, 3).getTime(), 'Tag der Deutschen Einheit');
+  add(new Date(y, 10, 1).getTime(), 'Allerheiligen');
+  add(new Date(y, 11, 25).getTime(), '1. Weihnachtstag');
+  add(new Date(y, 11, 26).getTime(), '2. Weihnachtstag');
+  return map;
+}
+
+// Zählt für einen Zeitraum (Kalenderjahr oder Schuljahr), an wie vielen Tagen an welchem Ort gearbeitet wurde.
+// Gezählt werden nur Tage mit erfasster Arbeitszeit. placeInfo(id) liefert { name, home }.
+export function taxReport(blocks, per, now, placeInfo) {
+  const days = new Map(); // Tag -> Menge der Arbeitsorte
+  const trips = {};
+  for (const b of blocks) {
+    for (const s of segments(b, now)) {
+      if (s.kind !== 'work') continue;
+      const end = s.to > s.from ? s.to - 1 : s.to;
+      for (let d = startOfDay(s.from); d <= end; d = addDays(d, 1)) {
+        if (d < per.from || d >= per.to) continue;
+        const k = dayKey(d);
+        if (!days.has(k)) days.set(k, new Set());
+        days.get(k).add(b.place);
+      }
+    }
+    const start = blockStart(b);
+    if (start >= per.from && start < per.to) trips[b.place] = (trips[b.place] || 0) + 1;
+  }
+
+  const holidays = new Map();
+  for (let y = new Date(per.from).getFullYear(); y <= new Date(per.to - 1).getFullYear(); y++) {
+    for (const [k, name] of holidaysNRW(y)) holidays.set(k, name);
+  }
+  const isWeekend = (ts) => [0, 6].includes(new Date(ts).getDay());
+
+  // Zählung je Arbeitsort
+  const count = {};
+  let homeOnly = 0;
+  let homeMixed = 0;
+  const toTs = (k) => new Date(`${k}T00:00`).getTime();
+  for (const [k, set] of days) {
+    const off = isWeekend(toTs(k)) || holidays.has(k);
+    let home = 0;
+    for (const id of set) {
+      if (!count[id]) count[id] = { days: 0, offDays: 0 };
+      count[id].days++;
+      if (off) count[id].offDays++;
+      if (placeInfo(id).home) home++;
+    }
+    if (home && home === set.size) homeOnly++;
+    else if (home) homeMixed++;
+  }
+
+  // Alle Tage bis heute, nach Monaten gruppiert, damit auch Tage ohne Erfassung zu sehen sind
+  const months = [];
+  const last = Math.min(per.to, addDays(startOfDay(now), 1));
+  for (let d = per.from; d < last; d = addDays(d, 1)) {
+    const date = new Date(d);
+    const label = `${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+    let month = months[months.length - 1];
+    if (!month || month.label !== label) {
+      month = { label, worked: 0, days: [] };
+      months.push(month);
+    }
+    const k = dayKey(d);
+    const places = days.has(k) ? [...days.get(k)] : [];
+    if (places.length) month.worked++;
+    month.days.push({ ts: d, places, weekend: isWeekend(d), holiday: holidays.get(k) || '' });
+  }
+
+  return {
+    period: per,
+    totalDays: days.size,
+    places: Object.keys(count).map((id) => ({
+      id,
+      name: placeInfo(id).name,
+      home: !!placeInfo(id).home,
+      days: count[id].days,
+      offDays: count[id].offDays,
+      trips: trips[id] || 0,
+    })),
+    homeOnly,
+    homeMixed,
+    months,
   };
 }
