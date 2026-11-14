@@ -39,6 +39,34 @@ export const putBlock = (block) => run('blocks', 'readwrite', (s) => s.put(block
 export const deleteBlock = (id) => run('blocks', 'readwrite', (s) => s.delete(id));
 export const putSettings = (settings) => run('meta', 'readwrite', (s) => s.put(settings, 'settings'));
 
+// Sicherung einlesen: Arbeitsblöcke und Einstellungen in einem Schritt speichern.
+// replace = true: Alle bisherigen Arbeitsblöcke werden vorher entfernt.
+// Geht etwas schief, bleibt alles wie vorher (alles oder nichts).
+export function saveAll(blocks, settings, replace) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['blocks', 'meta'], 'readwrite');
+    const bs = tx.objectStore('blocks');
+    if (replace) bs.clear();
+    for (const b of blocks) bs.put(b);
+    tx.objectStore('meta').put(settings, 'settings');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+// Mehrere Arbeitsblöcke auf einmal löschen (alte Daten)
+export function deleteBlocks(ids) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('blocks', 'readwrite');
+    const bs = tx.objectStore('blocks');
+    for (const id of ids) bs.delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
 // Bittet den Browser, die Daten nicht von selbst zu löschen, wenn der Speicher knapp wird.
 export function askPersistent() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

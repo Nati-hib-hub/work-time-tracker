@@ -231,6 +231,7 @@ h2 { font-size: 1rem; font-weight: 700; }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
 .btn.danger { background: var(--stop); color: var(--btn-ink); border-color: transparent; }
 .btn.danger-ghost { background: transparent; border-color: transparent; color: var(--stop); }
+.btn-sub { display: block; font-weight: 400; font-size: 0.85rem; opacity: 0.9; }
 
 .btn.big {
   min-height: 76px;

@@ -125,6 +125,10 @@ export function defaultSettings() {
     warnRunHours: 10,
     warnPauseHours: 3,
     theme: 'auto', // Darstellung: 'auto' = wie das Handy, 'light' = hell, 'dark' = dunkel
+    backupEvery: 'monat', // Erinnerung an die Sicherung: 'woche' oder 'monat'
+    // lastBackup    Zeitpunkt der letzten Sicherung (fehlt, solange es keine gab)
+    // backupSnooze  „Später“ gedrückt: bis zu diesem Zeitpunkt keine Erinnerung
+    // oldDataOk     Beginn des Zeitraums, für den „alte Daten behalten“ gewählt wurde
   };
 }
 

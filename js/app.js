@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, holidaysNRW, period, shiftAnchor, taxReport 
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.10 · Hell/Dunkel wählbar, Sanduhr';
+const VERSION = '0.11 · Datensicherung';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -162,6 +162,211 @@ function hintsHtml(b, t) {
     .join('');
 }
 
+// ---------- Datensicherung ----------
+//
+// Die Sicherung ist eine Datei (JSON) mit allen Arbeitsblöcken und allen Einstellungen.
+// In den Einstellungen stehen auch Arbeitsorte, Krankentage und später Ferientage.
+
+const BACKUP_APP = 'work-time-tracker';
+const BACKUP_FORMAT = 1;
+
+const validEvent = (e) => e && M.LABEL[e.t] && Number.isFinite(e.ts);
+const validBlock = (b) => b && typeof b.id === 'string' && typeof b.place === 'string' && Array.isArray(b.events) && b.events.length > 0 && b.events.every(validEvent);
+
+// Android teilt nicht jede Dateiart. Klappt .json nicht, wird dieselbe Sicherung als .txt geteilt.
+function backupFile(forShare) {
+  const t = Date.now();
+  const text = JSON.stringify({ app: BACKUP_APP, format: BACKUP_FORMAT, created: new Date(t).toISOString(), version: VERSION, settings: state.settings, blocks: state.blocks });
+  const base = `Work-Time-Tracker-Sicherung-${M.dayKey(t)}`;
+  const json = new File([text], `${base}.json`, { type: 'application/json' });
+  if (!forShare) return json;
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [json] })) return json;
+  } catch (e) {
+    /* dann eben als Text */
+  }
+  return new File([text], `${base}.txt`, { type: 'text/plain' });
+}
+
+// Datei herunterladen oder teilen. Gibt true zurück, wenn es geklappt hat.
+async function deliverFile(file, mode, title) {
+  if (mode === 'share') {
+    try {
+      await navigator.share({ files: [file], title });
+      return true;
+    } catch (e) {
+      if (e.name !== 'AbortError') toast('Teilen hat nicht geklappt. Versuche es mit „Herunterladen“.');
+      return false;
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file.name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  toast('Die Datei liegt jetzt im Download-Ordner.');
+  return true;
+}
+
+const backupBtns = () =>
+  `${canShareFiles() ? '<button class="btn primary" data-act="backup" data-mode="share"><span>📤 Sicherung teilen<small class="btn-sub">z. B. in Google Drive oder per E-Mail an dich</small></span></button>' : ''}
+  <button class="btn ${canShareFiles() ? '' : 'primary'}" data-act="backup" data-mode="save">⬇️ Sicherung herunterladen</button>`;
+
+const lastBackupText = () => {
+  const lb = state.settings.lastBackup;
+  return lb ? `Letzte Sicherung: <b>${M.fmtDate(lb)}</b>` : 'Du hast noch keine Sicherung gespeichert.';
+};
+
+// Ist eine Erinnerung an die Sicherung fällig?
+function backupDue(t) {
+  const s = state.settings;
+  if (!state.blocks.length) return false;
+  if (s.backupSnooze && t < s.backupSnooze) return false;
+  const last = s.lastBackup || 0;
+  if (!last) {
+    // Noch nie gesichert: erinnern, sobald die erste Erfassung eine Woche alt ist
+    const first = Math.min(...state.blocks.map(M.blockStart));
+    return t - first >= 7 * M.DAY;
+  }
+  if (s.backupEvery === 'woche') return t - last >= 7 * M.DAY;
+  // Monatlich: sobald ein neuer Kalendermonat begonnen hat (passt zum NaturGut-Monatsbericht)
+  const a = new Date(last);
+  const b = new Date(t);
+  return a.getFullYear() * 12 + a.getMonth() < b.getFullYear() * 12 + b.getMonth();
+}
+
+// Aufbewahrung: Mindestens das laufende und das vorige Schuljahr bleiben. Alles davor gilt als alt.
+function oldData(t) {
+  const cur = period('schuljahr', t);
+  const cutoff = period('schuljahr', M.addDays(cur.from, -1)).from;
+  const blocks = state.blocks.filter((b) => M.stateOf(b) === 'done' && M.lastEvent(b).ts < cutoff);
+  const sick = sickDays().filter((k) => keyToTs(k) < cutoff);
+  const lastOld = period('schuljahr', M.addDays(cutoff, -1));
+  const oldest = Math.min(...blocks.map(M.blockStart), ...sick.map(keyToTs));
+  const label = `${lastOld.label}${oldest < lastOld.from ? ' und früher' : ''}`;
+  return { cutoff, blocks, sick, label };
+}
+
+function backupHints(t) {
+  let h = '';
+  if (backupDue(t)) {
+    const lb = state.settings.lastBackup;
+    h += `<section class="hint"><p>💾 ${
+      lb ? `Deine letzte Sicherung ist vom ${M.fmtDate(lb)}.` : 'Du hast noch keine Sicherung deiner Zeiten gespeichert.'
+    } Magst du jetzt eine Sicherung machen? Dann gehen deine Zeiten nicht verloren, falls dem Handy etwas passiert.</p>
+      <div class="hint-acts"><button class="btn small" data-act="backupOpen">Jetzt sichern</button><button class="btn small" data-act="backupLater">Später</button></div></section>`;
+  }
+  const old = oldData(t);
+  if ((old.blocks.length || old.sick.length) && state.settings.oldDataOk !== old.cutoff) {
+    h += `<section class="hint"><p>🗂️ Es gibt Daten aus dem ${esc(old.label)}. Die App hebt mindestens zwei Schuljahre auf. Jetzt sichern und löschen?</p>
+      <div class="hint-acts"><button class="btn small" data-act="oldOpen">Sichern und löschen …</button><button class="btn small" data-act="oldKeep">Behalten</button></div></section>`;
+  }
+  return h;
+}
+
+function backupSheetHtml() {
+  return `<h2>Sicherung speichern</h2>
+    <p>Die Sicherung ist eine kleine Datei mit allen deinen Zeiten, Arbeitsorten, Krankentagen und Einstellungen.</p>
+    <p>Bewahre sie <b>außerhalb des Handys</b> auf, zum Beispiel in Google Drive oder als E-Mail an dich selbst. Mit „Sicherung einlesen“ (unter „Einstellungen“) holst du alles zurück, auch auf einem neuen Handy.</p>
+    <p class="muted small">${lastBackupText()}</p>
+    ${backupBtns()}
+    ${CANCEL}`;
+}
+
+function oldSheetHtml() {
+  const t = now();
+  const old = oldData(t);
+  const ms = old.blocks.reduce((s, b) => s + M.netMs(b, t), 0);
+  const backedUpToday = state.settings.lastBackup && state.settings.lastBackup >= M.startOfDay(t);
+  const parts = [];
+  if (old.blocks.length) parts.push(`<b>${old.blocks.length} ${old.blocks.length === 1 ? 'Arbeitsblock' : 'Arbeitsblöcke'}</b> mit zusammen ${M.fmtDur(ms)} Stunden`);
+  if (old.sick.length) parts.push(`<b>${nDays(old.sick.length)}</b> als krank markiert`);
+  return `<h2>Alte Daten löschen?</h2>
+    <p>Betroffen ist alles vor dem ${M.fmtDate(old.cutoff)} (${esc(old.label)}): ${parts.join(' und ') || 'nichts mehr'}.</p>
+    <p><b>Schritt 1:</b> Speichere vorher eine Sicherung. Dann kannst du die alten Daten später jederzeit wieder einlesen. Wenn du noch Berichte für diese Zeit brauchst, erstelle sie vorher unter „Berichte“.</p>
+    ${backupBtns()}
+    <p class="muted small">${lastBackupText()}</p>
+    <p><b>Schritt 2:</b> Alte Daten löschen.</p>
+    ${backedUpToday ? '' : '<p class="note-box">Du hast heute noch keine Sicherung gespeichert. Ohne Sicherung sind die alten Daten nach dem Löschen endgültig weg.</p>'}
+    <button class="btn danger" data-act="oldDel">${backedUpToday ? 'Alte Daten löschen' : 'Ohne Sicherung löschen'}</button>
+    <button class="btn ghost" data-act="oldKeep">Lieber behalten</button>`;
+}
+
+// Liest eine Sicherungsdatei. Gibt { blocks, settings, created } oder { err } zurück.
+function readBackup(text) {
+  const bad = { err: 'Diese Datei ist keine Sicherung des Work Time Trackers. Bitte wähle die Datei, die mit „Work-Time-Tracker-Sicherung“ beginnt.' };
+  let d;
+  try {
+    d = JSON.parse(text);
+  } catch (e) {
+    return bad;
+  }
+  if (!d || d.app !== BACKUP_APP || !Array.isArray(d.blocks) || !d.settings || typeof d.settings !== 'object') return bad;
+  if (Number(d.format) > BACKUP_FORMAT) {
+    return { err: 'Diese Sicherung stammt aus einer neueren Fassung der App. Bitte schließe die App ganz, öffne sie noch einmal (dann holt sie sich die neue Fassung) und versuche es danach erneut.' };
+  }
+  const blocks = d.blocks.filter(validBlock);
+  return { blocks, settings: d.settings, created: Date.parse(d.created) || 0, skipped: d.blocks.length - blocks.length };
+}
+
+let pendingRestore = null;
+
+function restoreSheetHtml() {
+  const r = pendingRestore;
+  const n = (k) => `${k} ${k === 1 ? 'Arbeitsblock' : 'Arbeitsblöcke'}`;
+  const placesIn = Array.isArray(r.settings.places) ? r.settings.places.length : 0;
+  const sickIn = Array.isArray(r.settings.sickDays) ? r.settings.sickDays.length : 0;
+  const starts = r.blocks.map(M.blockStart);
+  const range = starts.length ? ` aus der Zeit vom ${M.fmtDate(Math.min(...starts))} bis ${M.fmtDate(Math.max(...starts))}` : '';
+  let h = `<h2>Sicherung einlesen</h2>
+    <p>Sicherung vom <b>${r.created ? `${M.fmtDate(r.created)}, ${M.fmtTime(r.created)} Uhr` : 'unbekannten Datum'}</b>.</p>
+    <p>Darin: ${n(r.blocks.length)}${range}, ${placesIn} ${placesIn === 1 ? 'Arbeitsort' : 'Arbeitsorte'}${sickIn ? `, ${nDays(sickIn)} als krank markiert` : ''}.</p>
+    ${r.skipped ? `<p class="muted small">${n(r.skipped)} in der Datei waren beschädigt und werden übersprungen.</p>` : ''}`;
+  if (!state.blocks.length) {
+    return `${h}<p>Auf diesem Handy sind noch keine Zeiten gespeichert. Die Arbeitsorte und Einstellungen kommen aus der Sicherung.</p>
+      <button class="btn primary" data-act="restoreDo" data-how="replace">Sicherung einlesen</button>${CANCEL}`;
+  }
+  const have = new Set(state.blocks.map((b) => b.id));
+  const inFile = new Set(r.blocks.map((b) => b.id));
+  const fresh = r.blocks.filter((b) => !have.has(b.id)).length;
+  const onlyHere = state.blocks.filter((b) => !inFile.has(b.id)).length;
+  h += `<p>Auf diesem Handy sind gerade ${n(state.blocks.length)} gespeichert.</p>
+    <h2 class="sub">Ergänzen (empfohlen)</h2>
+    <p class="muted small">Alles, was schon auf diesem Handy ist, bleibt. Aus der Sicherung kommt nur dazu, was hier fehlt: ${fresh ? n(fresh) : 'keine Arbeitsblöcke'}, dazu fehlende Arbeitsorte und Krankentage.</p>
+    <button class="btn primary" data-act="restoreDo" data-how="merge">Ergänzen</button>
+    <h2 class="sub">Alles ersetzen</h2>
+    <p class="muted small">Alles auf diesem Handy wird durch die Sicherung ersetzt, auch Arbeitsorte und Einstellungen.</p>
+    ${onlyHere ? `<p class="note-box">${n(onlyHere)} ${onlyHere === 1 ? 'ist' : 'sind'} nur auf diesem Handy und nicht in der Sicherung. ${onlyHere === 1 ? 'Er wäre' : 'Sie wären'} danach weg.</p>` : ''}
+    <button class="btn danger" data-act="restoreDo" data-how="replace">Alles ersetzen</button>
+    ${CANCEL}`;
+  return h;
+}
+
+// Arbeitsblöcke und gespeicherte Einstellungen zu einem gültigen Stand zusammenbauen.
+// Jeder Arbeitsblock braucht seinen Arbeitsort in der Liste (sonst wird er ergänzt).
+function prepareData(blocks, saved) {
+  const settings = M.mergeSettings(saved, blocks.length > 0);
+  let repaired = false;
+  for (const b of blocks) {
+    if (!settings.places.some((p) => p.id === b.place)) {
+      settings.places.push(M.repairPlace(b.place));
+      repaired = true;
+    }
+  }
+  return { blocks, settings, repaired };
+}
+
+function adoptData(d) {
+  state.blocks = d.blocks;
+  state.settings = d.settings;
+  M.setPlaces(state.settings.places);
+  applyPlaceColors();
+  applyTheme();
+}
+
 // ---------- Bausteine ----------
 
 function blockItem(b, t) {
@@ -231,7 +436,7 @@ function viewHome() {
   const t = now();
   const b = openBlock();
   const todayMs = sumToday(t);
-  let h = hintsHtml(b, t);
+  let h = hintsHtml(b, t) + backupHints(t);
 
   if (!M.allPlaces().length) {
     h += `<section class="card"><h2>Willkommen!</h2>${starterHtml()}</section>`;
@@ -822,6 +1027,23 @@ function viewSettings() {
            ${M.allPlaces().filter((p) => p.hidden).map(placeRow).join('')}`
         : ''
     }
+  </section>
+  <section class="card">
+    <h2>Datensicherung</h2>
+    <p class="muted small">Deine Zeiten liegen nur auf diesem Handy. Eine Sicherung schützt sie, falls das Handy kaputtgeht, verloren geht oder die App gelöscht wird. Bewahre die Datei außerhalb des Handys auf, zum Beispiel in Google Drive oder als E-Mail an dich selbst.</p>
+    <p>${lastBackupText()}</p>
+    ${backupBtns()}
+    <label class="label">Beim Öffnen an die Sicherung erinnern</label>
+    <div class="chips mode-chips">${[
+      ['woche', 'Jede Woche'],
+      ['monat', 'Jeden Monat'],
+    ]
+      .map(([k, label]) => `<button class="chip ${(s.backupEvery || 'monat') === k ? 'on' : ''}" data-act="setBackupEvery" data-every="${k}">${label}</button>`)
+      .join('')}</div>
+    <h2 class="sub">Sicherung einlesen</h2>
+    <p class="muted small">Zum Beispiel auf einem neuen Handy. Wähle die Sicherungsdatei aus. Die App zeigt dir dann, was darin ist, und fragt nach, bevor sich etwas ändert.</p>
+    <button class="btn" data-act="restorePick">📂 Sicherung einlesen</button>
+    <input type="file" id="restore-file" data-change="restoreFile" hidden>
   </section>
   <section class="card">
     <h2>Darstellung</h2>
@@ -1771,23 +1993,115 @@ const actions = {
       console.error(e);
       return toast('Der Bericht konnte nicht erstellt werden.');
     }
-    if (el.dataset.mode === 'share') {
-      try {
-        await navigator.share({ files: [file], title: `${rep.title}, ${rep.label}` });
-      } catch (e) {
-        if (e.name !== 'AbortError') toast('Teilen hat nicht geklappt. Versuche es mit „Herunterladen“.');
-      }
-      return;
+    await deliverFile(file, el.dataset.mode, `${rep.title}, ${rep.label}`);
+  },
+
+  // ----- Datensicherung -----
+
+  setBackupEvery(el) {
+    state.settings.backupEvery = el.dataset.every;
+    saveSettings();
+    const view = $('#view');
+    const top = view.scrollTop;
+    render();
+    view.scrollTop = top;
+  },
+
+  backupOpen() {
+    openSheet(backupSheetHtml(), { type: 'backup' });
+  },
+
+  backupLater() {
+    // Erst morgen wieder erinnern
+    state.settings.backupSnooze = M.addDays(M.startOfDay(now()), 1);
+    saveSettings();
+    render();
+  },
+
+  async backup(el) {
+    const mode = el.dataset.mode;
+    const ok = await deliverFile(backupFile(mode === 'share'), mode, 'Work Time Tracker: Sicherung');
+    if (!ok) return;
+    state.settings.lastBackup = Date.now();
+    delete state.settings.backupSnooze;
+    saveSettings();
+    if (mode === 'share') toast('Danke! Die Sicherung ist gespeichert.');
+    if (ui.sheet && ui.sheet.type === 'backup') closeSheet();
+    else if (ui.sheet && ui.sheet.type === 'old') swapSheet(oldSheetHtml(), ui.sheet);
+    const view = $('#view');
+    const top = view.scrollTop;
+    render();
+    view.scrollTop = top;
+  },
+
+  restorePick() {
+    const input = $('#restore-file');
+    if (input) input.click();
+  },
+
+  async restoreDo(el) {
+    const r = pendingRestore;
+    if (!r) return closeSheet();
+    const replace = el.dataset.how === 'replace';
+    let d;
+    let toSave;
+    if (replace) {
+      d = prepareData(r.blocks, { ...r.settings, lastBackup: r.created || Date.now() });
+      delete d.settings.backupSnooze;
+      toSave = d.blocks;
+    } else {
+      const have = new Set(state.blocks.map((b) => b.id));
+      toSave = r.blocks.filter((b) => !have.has(b.id));
+      const inc = M.mergeSettings(r.settings, true);
+      const s = { ...state.settings, places: [...state.settings.places] };
+      for (const p of inc.places) if (!s.places.some((q) => q.id === p.id)) s.places.push(p);
+      s.sickDays = [...new Set([...(state.settings.sickDays || []), ...(r.settings.sickDays || [])])].sort();
+      if (!s.userName && inc.userName) s.userName = inc.userName;
+      d = prepareData([...state.blocks, ...toSave], s);
     }
-    const url = URL.createObjectURL(file);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 15000);
-    toast('Die Datei liegt jetzt im Download-Ordner.');
+    try {
+      await store.saveAll(toSave, d.settings, replace);
+    } catch (err) {
+      console.error(err);
+      return sheetErr('Das Einlesen hat leider nicht geklappt. Auf dem Handy hat sich nichts verändert.');
+    }
+    adoptData(d);
+    pendingRestore = null;
+    ui.detailId = null;
+    store.askPersistent();
+    closeSheet();
+    render();
+    toast(replace ? `Fertig: ${d.blocks.length} Arbeitsblöcke eingelesen.` : `Fertig: ${toSave.length} Arbeitsblöcke ergänzt.`);
+  },
+
+  oldOpen() {
+    openSheet(oldSheetHtml(), { type: 'old' });
+  },
+
+  oldKeep() {
+    state.settings.oldDataOk = oldData(now()).cutoff;
+    saveSettings();
+    if (ui.sheet) closeSheet();
+    render();
+    toast('Gut, die alten Daten bleiben. Im nächsten Schuljahr fragt die App wieder.');
+  },
+
+  async oldDel() {
+    const old = oldData(now());
+    const ids = old.blocks.map((b) => b.id);
+    try {
+      await store.deleteBlocks(ids);
+    } catch (err) {
+      console.error(err);
+      return sheetErr('Das Löschen hat leider nicht geklappt.');
+    }
+    const gone = new Set(ids);
+    state.blocks = state.blocks.filter((b) => !gone.has(b.id));
+    state.settings.sickDays = sickDays().filter((k) => !old.sick.includes(k));
+    saveSettings();
+    closeSheet();
+    render();
+    toast('Die alten Daten sind gelöscht.');
   },
 };
 
@@ -1888,6 +2202,26 @@ const changes = {
     p[el.dataset.key] = el.checked;
     saveSettings();
   },
+
+  // Sicherungsdatei wurde ausgewählt
+  async restoreFile(el) {
+    const file = el.files && el.files[0];
+    el.value = '';
+    if (!file) return;
+    let r;
+    try {
+      r = readBackup(await file.text());
+    } catch (err) {
+      console.error(err);
+      r = { err: 'Die Datei ließ sich nicht öffnen.' };
+    }
+    if (r.err) {
+      pendingRestore = null;
+      return openSheet(`<h2>Das hat nicht geklappt</h2><p>${esc(r.err)}</p><button class="btn" data-act="closeSheet">Schließen</button>`);
+    }
+    pendingRestore = r;
+    openSheet(restoreSheetHtml(), { type: 'restore' });
+  },
 };
 
 document.addEventListener('change', (e) => {
@@ -1919,20 +2253,11 @@ document.addEventListener('visibilitychange', () => {
 async function init() {
   try {
     const data = await store.load();
-    state.blocks = data.blocks.filter((b) => b && Array.isArray(b.events) && b.events.length);
-    state.settings = M.mergeSettings(data.settings, state.blocks.length > 0);
+    const blocks = data.blocks.filter((b) => b && Array.isArray(b.events) && b.events.length);
     // Sicherheitsnetz: Jeder gespeicherte Arbeitsblock braucht seinen Arbeitsort in der Liste.
-    let repaired = false;
-    for (const b of state.blocks) {
-      if (!state.settings.places.some((p) => p.id === b.place)) {
-        state.settings.places.push(M.repairPlace(b.place));
-        repaired = true;
-      }
-    }
-    M.setPlaces(state.settings.places);
-    applyPlaceColors();
-    applyTheme();
-    if (repaired) saveSettings();
+    const d = prepareData(blocks, data.settings);
+    adoptData(d);
+    if (d.repaired) saveSettings();
   } catch (err) {
     console.error(err);
     $('#view').innerHTML = '<p class="note-box">Die gespeicherten Daten konnten nicht geladen werden. Bitte schließe die App und öffne sie noch einmal.</p>';
