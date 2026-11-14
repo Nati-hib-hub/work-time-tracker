@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, holidaysNRW, period, shiftAnchor, taxReport 
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.11 · Datensicherung';
+const VERSION = '0.12 · Sicherung repariert, Selbst-Aktualisierung';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -173,19 +173,14 @@ const BACKUP_FORMAT = 1;
 const validEvent = (e) => e && M.LABEL[e.t] && Number.isFinite(e.ts);
 const validBlock = (b) => b && typeof b.id === 'string' && typeof b.place === 'string' && Array.isArray(b.events) && b.events.length > 0 && b.events.every(validEvent);
 
-// Android teilt nicht jede Dateiart. Klappt .json nicht, wird dieselbe Sicherung als .txt geteilt.
+// Chrome auf Android teilt keine .json-Dateien (meldet aber vorher trotzdem „geht“).
+// Deshalb wird die Sicherung zum Teilen als .txt verpackt. Der Inhalt ist derselbe.
 function backupFile(forShare) {
   const t = Date.now();
   const text = JSON.stringify({ app: BACKUP_APP, format: BACKUP_FORMAT, created: new Date(t).toISOString(), version: VERSION, settings: state.settings, blocks: state.blocks });
   const base = `Work-Time-Tracker-Sicherung-${M.dayKey(t)}`;
-  const json = new File([text], `${base}.json`, { type: 'application/json' });
-  if (!forShare) return json;
-  try {
-    if (navigator.canShare && navigator.canShare({ files: [json] })) return json;
-  } catch (e) {
-    /* dann eben als Text */
-  }
-  return new File([text], `${base}.txt`, { type: 'text/plain' });
+  if (forShare) return new File([text], `${base}.txt`, { type: 'text/plain' });
+  return new File([text], `${base}.json`, { type: 'application/json' });
 }
 
 // Datei herunterladen oder teilen. Gibt true zurück, wenn es geklappt hat.
@@ -195,7 +190,8 @@ async function deliverFile(file, mode, title) {
       await navigator.share({ files: [file], title });
       return true;
     } catch (e) {
-      if (e.name !== 'AbortError') toast('Teilen hat nicht geklappt. Versuche es mit „Herunterladen“.');
+      // Der Grund in Klammern hilft bei der Fehlersuche.
+      if (e.name !== 'AbortError') toast(`Teilen hat nicht geklappt (${e.name || 'Fehler'}). Versuche es mit „Herunterladen“.`);
       return false;
     }
   }
@@ -334,6 +330,7 @@ function restoreSheetHtml() {
   const fresh = r.blocks.filter((b) => !have.has(b.id)).length;
   const onlyHere = state.blocks.filter((b) => !inFile.has(b.id)).length;
   h += `<p>Auf diesem Handy sind gerade ${n(state.blocks.length)} gespeichert.</p>
+    ${fresh ? '' : '<p class="note-box">✅ Alle Arbeitsblöcke aus dieser Sicherung sind schon auf diesem Handy. Es fehlt nichts. Du kannst einfach auf „Abbrechen“ tippen.</p>'}
     <h2 class="sub">Ergänzen (empfohlen)</h2>
     <p class="muted small">Alles, was schon auf diesem Handy ist, bleibt. Aus der Sicherung kommt nur dazu, was hier fehlt: ${fresh ? n(fresh) : 'keine Arbeitsblöcke'}, dazu fehlende Arbeitsorte und Krankentage.</p>
     <button class="btn primary" data-act="restoreDo" data-how="merge">Ergänzen</button>
@@ -1043,7 +1040,6 @@ function viewSettings() {
     <h2 class="sub">Sicherung einlesen</h2>
     <p class="muted small">Zum Beispiel auf einem neuen Handy. Wähle die Sicherungsdatei aus. Die App zeigt dir dann, was darin ist, und fragt nach, bevor sich etwas ändert.</p>
     <button class="btn" data-act="restorePick">📂 Sicherung einlesen</button>
-    <input type="file" id="restore-file" data-change="restoreFile" hidden>
   </section>
   <section class="card">
     <h2>Darstellung</h2>
@@ -1064,7 +1060,8 @@ function viewSettings() {
     <input id="set-pause" type="number" inputmode="numeric" min="1" max="48" data-input="set" data-key="warnPauseHours" value="${s.warnPauseHours}">
     <p class="muted small">Bei Klassenfahrten gibt es diese Hinweise nicht.</p>
   </section>
-  <p class="muted small center">Work Time Tracker · Version ${VERSION}<br>Alle Daten liegen nur auf diesem Gerät.</p>`;
+  <p class="muted small center">Work Time Tracker · Version ${VERSION}<br>Alle Daten liegen nur auf diesem Gerät.</p>
+  <button class="btn ghost" data-act="checkVersion">🔄 Nach neuer Fassung suchen</button>`;
 }
 
 // ---------- Anzeige aufbauen ----------
@@ -1104,6 +1101,8 @@ function hideSheet() {
   ui.sheet = null;
   $('#backdrop').hidden = true;
   $('#sheet').innerHTML = '';
+  // Eine neue Fassung wartet, bis das Fenster zu ist
+  if (reloadPending) setTimeout(reloadNow, 400);
 }
 
 function closeSheet() {
@@ -2034,9 +2033,33 @@ const actions = {
     view.scrollTop = top;
   },
 
+  // Neue Fassung holen: Die Zeiten bleiben dabei auf dem Handy, nur die App wird neu geladen.
+  async checkVersion() {
+    if (!navigator.onLine) return toast('Dafür braucht das Handy Internet (WLAN oder mobile Daten).');
+    toast('Einen Moment, die App lädt neu …');
+    await checkUpdate();
+    setTimeout(() => location.reload(), 600);
+  },
+
+  // Dateiauswahl öffnen. Das Auswahlfeld hängt bewusst nicht im Bildschirm (#view):
+  // Auf Android wird die App beim Zurückkehren aus der Dateiauswahl neu gezeichnet,
+  // ein Feld im Bildschirm wäre dann schon ersetzt und die gewählte Datei käme nie an.
   restorePick() {
-    const input = $('#restore-file');
-    if (input) input.click();
+    const old = $('#restore-file');
+    if (old) old.remove();
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'restore-file';
+    input.hidden = true;
+    // Ohne diese Angabe bietet Android zuerst Kamera und Mediathek an statt der Dateien.
+    input.accept = '.json,.txt,application/json,text/plain,application/octet-stream';
+    input.addEventListener('change', () => {
+      const file = input.files && input.files[0];
+      input.remove();
+      if (file) restoreFromFile(file);
+    });
+    document.body.append(input);
+    input.click();
   },
 
   async restoreDo(el) {
@@ -2202,27 +2225,26 @@ const changes = {
     p[el.dataset.key] = el.checked;
     saveSettings();
   },
-
-  // Sicherungsdatei wurde ausgewählt
-  async restoreFile(el) {
-    const file = el.files && el.files[0];
-    el.value = '';
-    if (!file) return;
-    let r;
-    try {
-      r = readBackup(await file.text());
-    } catch (err) {
-      console.error(err);
-      r = { err: 'Die Datei ließ sich nicht öffnen.' };
-    }
-    if (r.err) {
-      pendingRestore = null;
-      return openSheet(`<h2>Das hat nicht geklappt</h2><p>${esc(r.err)}</p><button class="btn" data-act="closeSheet">Schließen</button>`);
-    }
-    pendingRestore = r;
-    openSheet(restoreSheetHtml(), { type: 'restore' });
-  },
 };
+
+// Sicherungsdatei wurde ausgewählt
+async function restoreFromFile(file) {
+  let r;
+  try {
+    r = readBackup(await file.text());
+  } catch (err) {
+    console.error(err);
+    r = { err: 'Die Datei ließ sich nicht öffnen.' };
+  }
+  // Falls noch ein anderes Fenster offen ist, wird sein Inhalt ersetzt.
+  const show = ui.sheet ? swapSheet : openSheet;
+  if (r.err) {
+    pendingRestore = null;
+    return show(`<h2>Das hat nicht geklappt</h2><p>${esc(r.err)}</p><button class="btn" data-act="closeSheet">Schließen</button>`);
+  }
+  pendingRestore = r;
+  show(restoreSheetHtml(), { type: 'restore' });
+}
 
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-change]');
@@ -2246,9 +2268,44 @@ window.addEventListener('popstate', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
+  if (reloadPending && reloadNow()) return;
   if (!ui.sheet && !isTyping()) render();
   else tick();
+  checkUpdate();
 });
+
+// ---------- Neue Fassung der App ----------
+//
+// Wird die App nur aus dem Hintergrund geholt, lädt sie sich nicht neu. Deshalb fragt sie beim
+// Öffnen nach einer neuen Fassung. Ist eine da, lädt sie sich neu, sobald gerade nichts eingegeben wird.
+
+let reloadPending = false;
+
+function checkUpdate() {
+  if (!('serviceWorker' in navigator) || !navigator.onLine) return Promise.resolve();
+  return navigator.serviceWorker
+    .getRegistration()
+    .then((reg) => reg && reg.update())
+    .catch(() => {});
+}
+
+function reloadNow() {
+  if (ui.sheet || isTyping()) return false;
+  location.reload();
+  return true;
+}
+
+function watchUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    // Beim allerersten Öffnen gibt es noch keine alte Fassung, dann ist nichts zu tun.
+    if (!hadController) return;
+    reloadPending = true;
+    reloadNow();
+  });
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
 
 async function init() {
   try {
@@ -2265,7 +2322,7 @@ async function init() {
   }
   render();
   setInterval(tick, 5000);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  watchUpdates();
 }
 
 init();

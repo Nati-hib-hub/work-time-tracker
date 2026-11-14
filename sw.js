@@ -2,7 +2,7 @@
 // Mit Internet wird immer die neueste Fassung geholt, ohne Internet die zuletzt gespeicherte.
 // Hier liegen nur die Programmdateien, keine Arbeitszeiten.
 
-const CACHE = 'wtt-app-v11';
+const CACHE = 'wtt-app-v12';
 const FILES = [
   './',
   './index.html',
@@ -23,7 +23,8 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE)
-      .then((cache) => cache.addAll(FILES))
+      // 'reload': am Browser-Zwischenspeicher vorbei, damit wirklich die neuen Dateien gespeichert werden
+      .then((cache) => cache.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
