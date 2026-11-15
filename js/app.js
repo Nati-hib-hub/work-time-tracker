@@ -2,11 +2,11 @@
 
 import * as M from './model.js';
 import * as store from './store.js';
-import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, period, shiftAnchor, taxReport } from './report.js';
+import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, monthPeriods, period, shiftAnchor, taxReport } from './report.js';
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.14 · Kranken- und Ferientage im PDF und Excel';
+const VERSION = '0.15 · Excel mit einem Blatt pro Monat';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -606,8 +606,8 @@ function viewHistory() {
 
 const repPeriod = () => period(ui.rep.kind, ui.rep.anchor, { from: ui.rep.from, to: ui.rep.to });
 
-function currentReport() {
-  return buildReport(state.blocks, repPeriod(), ui.rep.place, now(), { place: placeName, user: state.settings.userName });
+function currentReport(per = repPeriod()) {
+  return buildReport(state.blocks, per, ui.rep.place, now(), { place: placeName, user: state.settings.userName });
 }
 
 let shareOk = null;
@@ -1165,6 +1165,7 @@ function viewReport() {
         <label class="check slim"><input type="checkbox" data-change="expMark" data-key="expVac" ${state.settings.expVac ? 'checked' : ''}><span>Ferien im PDF und in Excel mit aufführen</span></label>
       </div>
       ${exportBtns('pdf', 'PDF')}${exportBtns('xlsx', 'Excel')}
+      ${monthPeriods(rep.period).length ? '<p class="muted small">In Excel bekommt jeder Monat ein eigenes Blatt. Vorne steht eine Übersicht mit allen Monaten.</p>' : ''}
       ${!rep.userName ? '<p class="muted small">Dein Name fehlt noch in der Kopfzeile. Du kannst ihn unter „Einstellungen“ eintragen.</p>' : ''}</section>
     ${reportTable(rep)}`;
   }
@@ -2208,7 +2209,15 @@ const actions = {
     rep.marks = exportMarks(rep);
     let file;
     try {
-      file = new File([pdf ? reportPdf(rep) : reportXlsx(rep)], name, { type });
+      // Excel über mehrere Monate: jeder Monat einzeln, mit eigenen Kranken-/Ferientagen
+      const months = pdf
+        ? []
+        : monthPeriods(rep.period).map((p) => {
+            const r = currentReport(p);
+            r.marks = exportMarks(r);
+            return { name: p.name, label: p.label, rep: r };
+          });
+      file = new File([pdf ? reportPdf(rep) : reportXlsx(rep, months)], name, { type });
     } catch (e) {
       console.error(e);
       return toast('Der Bericht konnte nicht erstellt werden.');

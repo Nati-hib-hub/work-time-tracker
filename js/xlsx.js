@@ -246,25 +246,70 @@ export function reportSheet(rep) {
   if (lastData >= firstData) sumRow[hoursIdx].f = `SUM(${col}${firstData}:${col}${lastData})`;
   rows.push(sumRow);
 
-  // Auf Wunsch: Kranken- und Ferientage unter der Summe (ohne Rahmen, damit der Text in die Nachbarzellen laufen darf)
-  if (rep.marks && rep.marks.lines.length) {
-    rows.push([]);
-    for (const [label, value] of rep.marks.lines) rows.push([`${label}: ${value}`]);
-  }
+  // Auf Wunsch: Kranken- und Ferientage unter der Summe
+  markLines(rep, rows);
 
   // In der Übersicht zusätzlich: Summen je Arbeitsort und je Kategorie
+  sumSections(rep, rows);
+
+  return { name: rep.label.replace(/\//g, '-'), widths, rows, landscape: !rep.detailed };
+}
+
+// Kranken- und Ferientage unter der Summe (ohne Rahmen, damit der Text in die Nachbarzellen laufen darf)
+function markLines(rep, rows) {
+  if (!rep.marks || !rep.marks.lines.length) return;
+  rows.push([]);
+  for (const [label, value] of rep.marks.lines) rows.push([`${label}: ${value}`]);
+}
+
+// Summen je Arbeitsort und je Kategorie (nicht beim ausführlichen Bericht)
+function sumSections(rep, rows) {
+  const S = STYLE;
   const section = (title, items) => {
     rows.push([], [{ v: title, s: S.boldText }, { v: 'Stunden', s: S.boldText }]);
-    for (const it of items) rows.push([T(it.name), { v: it.ms / 86400000, s: S.dur }]);
+    for (const it of items) rows.push([{ v: it.name, s: S.text }, { v: it.ms / 86400000, s: S.dur }]);
   };
   if (!rep.detailed) {
     if (rep.all && rep.byPlace.length) section('Summe je Arbeitsort', rep.byPlace);
     if (rep.byCategory.length) section('Summe je Kategorie', rep.byCategory);
   }
-
-  return { name: rep.label.replace(/\//g, '-'), widths, rows, landscape: !rep.detailed };
 }
 
-export function reportXlsx(rep) {
-  return makeXlsx([reportSheet(rep)]);
+// Erstes Blatt bei Berichten über mehrere Monate: jeder Monat mit seinen Stunden, darunter die Gesamtsumme.
+// months = [{ name, label, rep }], auch Monate ohne Zeiten (die stehen hier mit 0:00).
+function overviewSheet(rep, months) {
+  const S = STYLE;
+  const rows = [
+    [{ v: rep.title, s: S.title }],
+    [rep.userName ? `Name: ${rep.userName}` : null],
+    [rep.period.line],
+    [],
+    [{ v: 'Monat', s: S.head }, { v: 'Stunden', s: S.head }],
+  ];
+  const firstData = rows.length + 1;
+  // Neben leeren Monaten ein Hinweis ohne Rahmen, damit er in die Nachbarzellen laufen darf
+  for (const m of months) {
+    rows.push([
+      { v: m.label, s: S.text },
+      { v: m.rep.totalMs / 86400000, s: S.dur },
+      m.rep.rows.length ? null : 'In diesem Monat wurde nichts eingetragen.',
+    ]);
+  }
+  const lastData = rows.length;
+  rows.push([
+    { v: rep.period.sumLabel, s: S.boldText },
+    { v: rep.totalMs / 86400000, s: S.boldDur, f: `SUM(B${firstData}:B${lastData})` },
+  ]);
+  markLines(rep, rows);
+  sumSections(rep, rows);
+  rows.push([], ['Jeder Monat mit Zeiten steht auf einem eigenen Blatt (die Reiter unten).']);
+  if (months.some((m) => !m.rep.rows.length)) rows.push(['Monate, in denen nichts eingetragen wurde, haben kein eigenes Blatt.']);
+  return { name: 'Übersicht', widths: [34, 12], rows, landscape: false };
+}
+
+// months: bei Berichten über mehrere Monate die einzelnen Monate (siehe monthPeriods in report.js)
+export function reportXlsx(rep, months) {
+  if (!months || months.length < 2) return makeXlsx([reportSheet(rep)]);
+  const sheets = months.filter((m) => m.rep.rows.length).map((m) => ({ ...reportSheet(m.rep), name: m.name }));
+  return makeXlsx([overviewSheet(rep, months), ...sheets]);
 }

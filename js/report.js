@@ -115,6 +115,38 @@ export function shiftAnchor(kind, anchor, n) {
   return new Date(d.getFullYear() + n, d.getMonth(), 1).getTime();
 }
 
+// Für Excel (Anforderungen 8.1, 15.11.2026): Ein Zeitraum über mehrere Monate wird in Monate aufgeteilt,
+// damit jeder Monat ein eigenes Blatt bekommt. Gilt für Schuljahr, Jahr und Von–Bis, nicht für Wochen.
+// Angebrochene Monate (bei Von–Bis) bekommen als Bezeichnung die genauen Tage.
+// Gibt eine leere Liste zurück, wenn alles in einem Monat liegt.
+export function monthPeriods(per) {
+  if (!['schuljahr', 'jahr', 'frei'].includes(per.kind)) return [];
+  const out = [];
+  let d = new Date(per.from);
+  d = new Date(d.getFullYear(), d.getMonth(), 1);
+  while (d.getTime() < per.to) {
+    const next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    const from = Math.max(d.getTime(), per.from);
+    const to = Math.min(next.getTime(), per.to);
+    const name = `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    const whole = from === d.getTime() && to === next.getTime();
+    const last = addDays(to, -1);
+    const label = whole ? name : from === last ? dmy(from) : `${dm(from)}–${dmy(last)}`;
+    out.push({
+      kind: 'monat',
+      from,
+      to,
+      name,
+      label,
+      key: `${d.getFullYear()}-${pad(d.getMonth() + 1)}`,
+      line: whole ? `Monat: ${label}` : `Zeitraum: ${label}`,
+      sumLabel: 'Monatssumme netto (ohne Pausen)',
+    });
+    d = next;
+  }
+  return out.length > 1 ? out : [];
+}
+
 // Unterteilung für das Säulendiagramm: Tage, Wochen oder Monate, je nach Länge des Zeitraums
 function buckets(per) {
   const days = Math.round((per.to - per.from) / DAY);
