@@ -13,6 +13,8 @@ export const LABEL = { start: 'Start', pause: 'Pause', weiter: 'Weiter', stopp: 
 export const NIGHT_DEFAULT = 0.5;
 export const nightFactor = (e) => (Number.isFinite(e.f) && e.f >= 0 && e.f <= 1 ? e.f : NIGHT_DEFAULT);
 export const pct = (f) => `${Math.round(f * 100)} %`;
+// Gezählter Teil einer Nachtruhe, auf volle Minuten gerundet (sonst gehen Zeilen und Summe nicht auf)
+export const nightCount = (ms, f) => Math.round((ms * f) / 60000) * 60000;
 
 // Name eines Ereignisses im Protokoll. Nach einer Nachtruhe heißt „Weiter“ wie der Knopf: „Start“.
 export function evLabel(b, i) {
@@ -277,7 +279,7 @@ export function netMs(b, now, from = -Infinity, to = Infinity) {
   for (const s of segments(b, now)) {
     const part = Math.max(0, Math.min(s.to, to) - Math.max(s.from, from));
     if (s.kind === 'work') sum += part;
-    else if (s.kind === 'night') sum += part * s.f;
+    else if (s.kind === 'night') sum += nightCount(part, s.f);
   }
   return sum;
 }
@@ -289,7 +291,7 @@ export function nightMs(b, now) {
   for (const s of segments(b, now)) {
     if (s.kind !== 'night') continue;
     raw += s.to - s.from;
-    counted += (s.to - s.from) * s.f;
+    counted += nightCount(s.to - s.from, s.f);
   }
   return { raw, counted };
 }

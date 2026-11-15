@@ -8,7 +8,7 @@
 
 import {
   DAY, MONTHS, WEEKDAYS,
-  addDays, blockNotes, blockStart, dayKey, defaultCategory, fmtDate, fmtDur, isDetailed, pad, pct, segments, startOfDay, stateOf,
+  addDays, blockNotes, blockStart, dayKey, defaultCategory, fmtDate, fmtDur, isDetailed, nightCount, pad, pct, segments, startOfDay, stateOf,
 } from './model.js';
 
 export const PERIOD_KINDS = [
@@ -242,19 +242,20 @@ export function buildReport(blocks, per, place, now, names, opts = {}) {
         hasNight = true;
         continue;
       }
-      const f = s.kind === 'night' ? s.f : 1;
+      // Nachtruhe zählt mit ihrem Anteil, auf volle Minuten gerundet
+      const count = (ms0) => (s.kind === 'night' ? nightCount(ms0, s.f) : ms0);
       if (s.kind === 'night') {
         hasNight = true;
         nightRaw += s.to - s.from;
-        nightCounted += (s.to - s.from) * f;
-        nightFactors.add(f);
+        nightCounted += count(s.to - s.from);
+        nightFactors.add(s.f);
       }
-      ms += (s.to - s.from) * f;
+      ms += count(s.to - s.from);
       for (const c of series) {
         const part = Math.min(s.to, c.to) - Math.max(s.from, c.from);
         if (part > 0) {
-          c.ms += part * f;
-          c.parts[b.place] = (c.parts[b.place] || 0) + part * f;
+          c.ms += count(part);
+          c.parts[b.place] = (c.parts[b.place] || 0) + count(part);
         }
       }
     }
@@ -276,7 +277,7 @@ export function buildReport(blocks, per, place, now, names, opts = {}) {
             from: s.from,
             to: s.to,
             raw: s.to - s.from,
-            ms: (s.to - s.from) * s.f,
+            ms: nightCount(s.to - s.from, s.f),
             f: s.f,
             text: nightRowText(s.to - s.from, s.f),
           });
@@ -358,7 +359,7 @@ export function buildReport(blocks, per, place, now, names, opts = {}) {
                 from: s.from,
                 to: s.to,
                 raw: s.to - s.from,
-                ms: (s.to - s.from) * s.f,
+                ms: nightCount(s.to - s.from, s.f),
                 f: s.f,
                 text: nightRowText(s.to - s.from, s.f),
               });

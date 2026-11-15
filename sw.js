@@ -2,7 +2,7 @@
 // Mit Internet wird immer die neueste Fassung geholt, ohne Internet die zuletzt gespeicherte.
 // Hier liegen nur die Programmdateien, keine Arbeitszeiten.
 
-const CACHE = 'wtt-app-v17';
+const CACHE = 'wtt-app-v18';
 const FILES = [
   './',
   './index.html',

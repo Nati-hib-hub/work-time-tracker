@@ -6,7 +6,8 @@ import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, monthPeriods, period
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.17 · Nachtruhe bei Klassenfahrten';
+// Nur die Nummer. Wunsch der Nutzerin (15.11.2026): in den Einstellungen keine Beschreibung der Änderung anzeigen.
+const VERSION = '0.18';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -633,6 +634,24 @@ function viewHistory() {
 // ---------- Bildschirm: Berichte ----------
 
 const repPeriod = () => period(ui.rep.kind, ui.rep.anchor, { from: ui.rep.from, to: ui.rep.to });
+
+// Die Auswahl bei „Berichte“ (Art des Zeitraums, Arbeitsort, Tage bei „Von–Bis“) bleibt über einen Neustart erhalten.
+// Der Zeitraum selbst beginnt nach dem Öffnen wieder bei heute.
+function saveRepSel() {
+  const r = ui.rep;
+  state.settings.repSel = { kind: r.kind, place: r.place, from: r.from, to: r.to };
+  saveSettings();
+}
+function loadRepSel() {
+  const sel = state.settings.repSel;
+  if (!sel || typeof sel !== 'object') return;
+  if (PERIOD_KINDS.some(([k]) => k === sel.kind)) ui.rep.kind = sel.kind;
+  if (sel.place === 'all' || M.placeIds().includes(sel.place)) ui.rep.place = sel.place;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(sel.from || '') && /^\d{4}-\d{2}-\d{2}$/.test(sel.to || '')) {
+    ui.rep.from = sel.from;
+    ui.rep.to = sel.to;
+  }
+}
 
 // night = false: Nachtruhe bei Klassenfahrten weder aufführen noch mitzählen (Häkchen beim Speichern)
 function currentReport(per = repPeriod(), night = true) {
@@ -2312,6 +2331,7 @@ const actions = {
       ui.rep.to = M.dayKey(M.addDays(per.to, -1));
     }
     ui.rep.kind = kind;
+    saveRepSel();
     render();
   },
   repShift(el) {
@@ -2324,6 +2344,7 @@ const actions = {
   },
   repPlace(el) {
     ui.rep.place = el.dataset.place;
+    saveRepSel();
     render();
   },
   colInfo(el) {
@@ -2562,6 +2583,7 @@ const changes = {
   repDate(el) {
     if (!el.value) return;
     ui.rep[el.dataset.key] = el.value;
+    saveRepSel();
     render();
   },
 
@@ -2708,6 +2730,7 @@ async function init() {
     // Sicherheitsnetz: Jeder gespeicherte Arbeitsblock braucht seinen Arbeitsort in der Liste.
     const d = prepareData(blocks, data.settings);
     adoptData(d);
+    loadRepSel();
     if (d.repaired) saveSettings();
   } catch (err) {
     console.error(err);
