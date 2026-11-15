@@ -319,6 +319,48 @@ export function holidaysNRW(y) {
   return map;
 }
 
+// Schulferien in NRW als Vorlage zum Antippen: erster und letzter Ferientag.
+// Quelle: Ferienordnung des Schulministeriums NRW (schulministerium.nrw), nachgesehen am 14.11.2026.
+// Neue Schuljahre hier unten anhängen. Bewegliche Ferientage legt jede Schule selbst fest, die fehlen hier.
+const FERIEN_NRW = [
+  ['Herbstferien', '2025-10-13', '2025-10-25'],
+  ['Weihnachtsferien', '2025-12-22', '2026-01-06'],
+  ['Osterferien', '2026-03-30', '2026-04-11'],
+  ['Pfingstferien', '2026-05-26', '2026-05-26'],
+  ['Sommerferien', '2026-07-20', '2026-09-01'],
+  ['Herbstferien', '2026-10-17', '2026-10-31'],
+  ['Weihnachtsferien', '2026-12-23', '2027-01-06'],
+  ['Osterferien', '2027-03-22', '2027-04-03'],
+  ['Pfingstferien', '2027-05-18', '2027-05-18'],
+  ['Sommerferien', '2027-07-19', '2027-08-31'],
+  ['Herbstferien', '2027-10-23', '2027-11-06'],
+  ['Weihnachtsferien', '2027-12-24', '2028-01-08'],
+  ['Osterferien', '2028-04-10', '2028-04-22'],
+  ['Sommerferien', '2028-07-10', '2028-08-22'],
+  ['Herbstferien', '2028-10-23', '2028-11-04'],
+  ['Weihnachtsferien', '2028-12-21', '2029-01-05'],
+  ['Osterferien', '2029-03-26', '2029-04-07'],
+  ['Pfingstferien', '2029-05-22', '2029-05-22'],
+  ['Sommerferien', '2029-07-02', '2029-08-14'],
+  ['Herbstferien', '2029-10-15', '2029-10-27'],
+  ['Weihnachtsferien', '2029-12-20', '2030-01-04'],
+  ['Osterferien', '2030-04-15', '2030-04-27'],
+];
+
+// Alle NRW-Ferien, die in den Zeitraum [from, to) hineinreichen: { name, from, to, keys }
+export function ferienNRW(from, to) {
+  const toTs = (k) => new Date(`${k}T00:00`).getTime();
+  return FERIEN_NRW.map(([name, a, b]) => {
+    const f = toTs(a);
+    const t = toTs(b);
+    const ya = a.slice(0, 4);
+    const yb = b.slice(0, 4);
+    const keys = [];
+    for (let d = f; d <= t; d = addDays(d, 1)) keys.push(dayKey(d));
+    return { name: `${name} ${ya === yb ? ya : `${ya}/${yb.slice(2)}`}`, from: f, to: t, keys };
+  }).filter((x) => x.to >= from && x.from < to);
+}
+
 // Zählt für einen Zeitraum (Kalenderjahr oder Schuljahr), an wie vielen Tagen an welchem Ort gearbeitet wurde.
 // Gezählt werden nur Tage mit erfasster Arbeitszeit. placeInfo(id) liefert { name, home }.
 export function taxReport(blocks, per, now, placeInfo) {

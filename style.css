@@ -434,16 +434,25 @@ table.report { border-collapse: collapse; width: 100%; font-size: 0.86rem; font-
 
 /* ---------- Übersicht für die Steuer ---------- */
 
-.mode-chips .chip { flex: 1; text-align: center; padding: 6px 8px; font-size: 0.9rem; }
-.sick-tag { display: inline-block; padding: 0 8px; border-radius: 999px; background: var(--stop); color: var(--btn-ink); font-size: 0.82rem; font-weight: 700; }
+/* Vier Knöpfe oben (Arbeitszeit, Steuer-Tage, Krankentage, Ferien): zwei pro Reihe */
+.mode-chips { display: grid; grid-template-columns: 1fr 1fr; }
+.mode-chips .chip { text-align: center; padding: 6px 8px; font-size: 0.9rem; }
+.sick-tag, .vac-tag { display: inline-block; padding: 0 8px; border-radius: 999px; background: var(--stop); color: var(--btn-ink); font-size: 0.82rem; font-weight: 700; }
+.vac-tag { background: var(--go); }
 
+.switches { display: grid; gap: 6px; }
 .check.slim { align-items: center; gap: 10px; font-size: 0.92rem; color: var(--muted); }
 .check.slim input { width: 22px; height: 22px; margin: 0; }
 .sick-dot { background: var(--stop); }
-.tax-name .sick-tag { margin-right: 4px; }
-/* Im Säulendiagramm: roter Punkt über der Beschriftung eines Tages mit Krankmeldung */
-.col-labels.has-sick span::before { content: ''; display: block; width: 7px; height: 7px; margin: 0 auto 2px; border-radius: 50%; }
-.col-labels.has-sick span.sick::before { background: var(--stop); }
+.vac-dot { background: var(--go); }
+.tax-name .sick-tag, .tax-name .vac-tag { margin-right: 4px; }
+/* Im Säulendiagramm: roter Punkt = krank markiert, grüner Punkt = Ferien, über der Beschriftung */
+.col-labels .mk { display: flex; justify-content: center; gap: 2px; height: 7px; margin-bottom: 2px; font-style: normal; }
+.col-labels .mk i { display: block; width: 7px; height: 7px; border-radius: 50%; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.preset-row .btn.small { flex: none; }
+.sub-row .tax-name { font-weight: 400; padding-left: 14px; }
+.sub-row b { font-size: 1rem; }
 
 /* Kalender für die Krankentage */
 .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
@@ -452,6 +461,8 @@ table.report { border-collapse: collapse; width: 100%; font-size: 0.86rem; font-
 .cal-day.off { background: transparent; color: var(--muted); }
 .cal-day.today { border-color: var(--accent); border-width: 2.5px; }
 .cal-day.sick { background: var(--stop); color: var(--btn-ink); border-color: transparent; font-weight: 700; }
+.cal-day.vac { background: var(--go); color: var(--btn-ink); border-color: transparent; font-weight: 700; }
+.cal-day.vac.today { border-color: var(--text); }
 .cal-num { font-size: 1rem; font-variant-numeric: tabular-nums; }
 .cal-mark { font-size: 0.6rem; min-height: 0.75rem; }
 .tax-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }

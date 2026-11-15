@@ -2,11 +2,11 @@
 
 import * as M from './model.js';
 import * as store from './store.js';
-import { PERIOD_KINDS, buildReport, holidaysNRW, period, shiftAnchor, taxReport } from './report.js';
+import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, period, shiftAnchor, taxReport } from './report.js';
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.12 · Sicherung repariert, Selbst-Aktualisierung';
+const VERSION = '0.13 · Ferientage';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -20,8 +20,11 @@ const ui = {
   histMonth: { y: today.getFullYear(), m: today.getMonth() },
   // Bericht: Art des Zeitraums, ein Zeitpunkt darin, Arbeitsort ('all' = alle) und die Tage für "Von–Bis"
   catsOpen: null, // Arbeitsblock, bei dem „Weitere“ Kategorien gerade aufgeklappt sind
-  repMode: 'zeit', // 'zeit' = Arbeitszeit-Berichte, 'steuer' = Tage zählen für die Steuererklärung, 'krank' = Krankentage
+  repMode: 'zeit', // 'zeit' = Arbeitszeit-Berichte, 'steuer' = Tage zählen für die Steuererklärung, 'krank' = Krankentage, 'ferien' = Ferientage
   sickMonth: { y: today.getFullYear(), m: today.getMonth() },
+  vacMonth: { y: today.getFullYear(), m: today.getMonth() },
+  vacFrom: '', // Felder „von … bis“ auf der Ferien-Seite
+  vacTo: '',
   taxKind: 'jahr', // 'jahr' = Kalenderjahr, 'schuljahr'
   taxAnchor: today.getTime(),
   rep: { kind: 'monat', anchor: today.getTime(), place: 'all', from: M.dayKey(today.getTime()), to: M.dayKey(today.getTime()) },
@@ -165,7 +168,7 @@ function hintsHtml(b, t) {
 // ---------- Datensicherung ----------
 //
 // Die Sicherung ist eine Datei (JSON) mit allen Arbeitsblöcken und allen Einstellungen.
-// In den Einstellungen stehen auch Arbeitsorte, Krankentage und später Ferientage.
+// In den Einstellungen stehen auch Arbeitsorte, Krankentage und Ferientage.
 
 const BACKUP_APP = 'work-time-tracker';
 const BACKUP_FORMAT = 1;
@@ -240,10 +243,11 @@ function oldData(t) {
   const cutoff = period('schuljahr', M.addDays(cur.from, -1)).from;
   const blocks = state.blocks.filter((b) => M.stateOf(b) === 'done' && M.lastEvent(b).ts < cutoff);
   const sick = sickDays().filter((k) => keyToTs(k) < cutoff);
+  const vac = vacDays().filter((k) => keyToTs(k) < cutoff);
   const lastOld = period('schuljahr', M.addDays(cutoff, -1));
-  const oldest = Math.min(...blocks.map(M.blockStart), ...sick.map(keyToTs));
+  const oldest = Math.min(...blocks.map(M.blockStart), ...sick.map(keyToTs), ...vac.map(keyToTs));
   const label = `${lastOld.label}${oldest < lastOld.from ? ' und früher' : ''}`;
-  return { cutoff, blocks, sick, label };
+  return { cutoff, blocks, sick, vac, label };
 }
 
 function backupHints(t) {
@@ -256,7 +260,7 @@ function backupHints(t) {
       <div class="hint-acts"><button class="btn small" data-act="backupOpen">Jetzt sichern</button><button class="btn small" data-act="backupLater">Später</button></div></section>`;
   }
   const old = oldData(t);
-  if ((old.blocks.length || old.sick.length) && state.settings.oldDataOk !== old.cutoff) {
+  if ((old.blocks.length || old.sick.length || old.vac.length) && state.settings.oldDataOk !== old.cutoff) {
     h += `<section class="hint"><p>🗂️ Es gibt Daten aus dem ${esc(old.label)}. Die App hebt mindestens zwei Schuljahre auf. Jetzt sichern und löschen?</p>
       <div class="hint-acts"><button class="btn small" data-act="oldOpen">Sichern und löschen …</button><button class="btn small" data-act="oldKeep">Behalten</button></div></section>`;
   }
@@ -265,7 +269,7 @@ function backupHints(t) {
 
 function backupSheetHtml() {
   return `<h2>Sicherung speichern</h2>
-    <p>Die Sicherung ist eine kleine Datei mit allen deinen Zeiten, Arbeitsorten, Krankentagen und Einstellungen.</p>
+    <p>Die Sicherung ist eine kleine Datei mit allen deinen Zeiten, Arbeitsorten, Kranken- und Ferientagen und Einstellungen.</p>
     <p>Bewahre sie <b>außerhalb des Handys</b> auf, zum Beispiel in Google Drive oder als E-Mail an dich selbst. Mit „Sicherung einlesen“ (unter „Einstellungen“) holst du alles zurück, auch auf einem neuen Handy.</p>
     <p class="muted small">${lastBackupText()}</p>
     ${backupBtns()}
@@ -280,8 +284,10 @@ function oldSheetHtml() {
   const parts = [];
   if (old.blocks.length) parts.push(`<b>${old.blocks.length} ${old.blocks.length === 1 ? 'Arbeitsblock' : 'Arbeitsblöcke'}</b> mit zusammen ${M.fmtDur(ms)} Stunden`);
   if (old.sick.length) parts.push(`<b>${nDays(old.sick.length)}</b> als krank markiert`);
+  if (old.vac.length) parts.push(`<b>${nDays(old.vac.length)}</b> als Ferien markiert`);
+  const listed = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} und ${parts[parts.length - 1]}` : parts[0];
   return `<h2>Alte Daten löschen?</h2>
-    <p>Betroffen ist alles vor dem ${M.fmtDate(old.cutoff)} (${esc(old.label)}): ${parts.join(' und ') || 'nichts mehr'}.</p>
+    <p>Betroffen ist alles vor dem ${M.fmtDate(old.cutoff)} (${esc(old.label)}): ${listed || 'nichts mehr'}.</p>
     <p><b>Schritt 1:</b> Speichere vorher eine Sicherung. Dann kannst du die alten Daten später jederzeit wieder einlesen. Wenn du noch Berichte für diese Zeit brauchst, erstelle sie vorher unter „Berichte“.</p>
     ${backupBtns()}
     <p class="muted small">${lastBackupText()}</p>
@@ -315,11 +321,12 @@ function restoreSheetHtml() {
   const n = (k) => `${k} ${k === 1 ? 'Arbeitsblock' : 'Arbeitsblöcke'}`;
   const placesIn = Array.isArray(r.settings.places) ? r.settings.places.length : 0;
   const sickIn = Array.isArray(r.settings.sickDays) ? r.settings.sickDays.length : 0;
+  const vacIn = Array.isArray(r.settings.vacDays) ? r.settings.vacDays.length : 0;
   const starts = r.blocks.map(M.blockStart);
   const range = starts.length ? ` aus der Zeit vom ${M.fmtDate(Math.min(...starts))} bis ${M.fmtDate(Math.max(...starts))}` : '';
   let h = `<h2>Sicherung einlesen</h2>
     <p>Sicherung vom <b>${r.created ? `${M.fmtDate(r.created)}, ${M.fmtTime(r.created)} Uhr` : 'unbekannten Datum'}</b>.</p>
-    <p>Darin: ${n(r.blocks.length)}${range}, ${placesIn} ${placesIn === 1 ? 'Arbeitsort' : 'Arbeitsorte'}${sickIn ? `, ${nDays(sickIn)} als krank markiert` : ''}.</p>
+    <p>Darin: ${n(r.blocks.length)}${range}, ${placesIn} ${placesIn === 1 ? 'Arbeitsort' : 'Arbeitsorte'}${sickIn ? `, ${nDays(sickIn)} als krank markiert` : ''}${vacIn ? `, ${nDays(vacIn)} als Ferien markiert` : ''}.</p>
     ${r.skipped ? `<p class="muted small">${n(r.skipped)} in der Datei waren beschädigt und werden übersprungen.</p>` : ''}`;
   if (!state.blocks.length) {
     return `${h}<p>Auf diesem Handy sind noch keine Zeiten gespeichert. Die Arbeitsorte und Einstellungen kommen aus der Sicherung.</p>
@@ -332,7 +339,7 @@ function restoreSheetHtml() {
   h += `<p>Auf diesem Handy sind gerade ${n(state.blocks.length)} gespeichert.</p>
     ${fresh ? '' : '<p class="note-box">✅ Alle Arbeitsblöcke aus dieser Sicherung sind schon auf diesem Handy. Es fehlt nichts. Du kannst einfach auf „Abbrechen“ tippen.</p>'}
     <h2 class="sub">Ergänzen (empfohlen)</h2>
-    <p class="muted small">Alles, was schon auf diesem Handy ist, bleibt. Aus der Sicherung kommt nur dazu, was hier fehlt: ${fresh ? n(fresh) : 'keine Arbeitsblöcke'}, dazu fehlende Arbeitsorte und Krankentage.</p>
+    <p class="muted small">Alles, was schon auf diesem Handy ist, bleibt. Aus der Sicherung kommt nur dazu, was hier fehlt: ${fresh ? n(fresh) : 'keine Arbeitsblöcke'}, dazu fehlende Arbeitsorte, Kranken- und Ferientage.</p>
     <button class="btn primary" data-act="restoreDo" data-how="merge">Ergänzen</button>
     <h2 class="sub">Alles ersetzen</h2>
     <p class="muted small">Alles auf diesem Handy wird durch die Sicherung ersetzt, auch Arbeitsorte und Einstellungen.</p>
@@ -661,21 +668,27 @@ function columnChart(rep) {
   if (s.length < 2 || rep.totalMs <= 0) return '';
   const maxH = Math.max(...s.map((c) => c.ms)) / M.HOUR;
   const top = NICE_HOURS.find((n) => n >= maxH) || Math.ceil(maxH / 100) * 100;
-  // Krankentage je Säule (nur wenn sie angezeigt werden sollen)
+  // Kranken- und Ferientage je Säule (nur wenn sie angezeigt werden sollen)
   let anySick = false;
+  let anyVac = false;
   for (const c of s) {
-    c.sick = showSick() ? sickCount(c.from, c.to).all : 0;
+    c.sick = showSick() ? dayCount(sickDays(), c.from, c.to).all : 0;
+    c.vac = showVac() ? dayCount(vacDays(), c.from, c.to).all : 0;
     if (c.sick) anySick = true;
+    if (c.vac) anyVac = true;
   }
   const cols = s
     .map((c, i) => {
       const ids = rep.all ? M.placeIds().filter((id) => c.parts[id] > 0) : c.ms > 0 ? [rep.place] : [];
       const segs = ids.map((id) => `<span class="col-seg place-${id}" style="flex-grow:${Math.round((rep.all ? c.parts[id] : c.ms) / M.MIN)}"></span>`).join('');
-      const tip = `${c.full}: ${M.fmtDur(c.ms)} Std.${c.sick ? `, ${nDays(c.sick)} krank markiert` : ''}`;
+      const tip = `${c.full}: ${M.fmtDur(c.ms)} Std.${colMarks(c)}`;
       return `<button class="col" data-act="colInfo" data-i="${i}" title="${esc(tip)}" aria-label="${esc(tip)}"><span class="col-stack" style="height:${((c.ms / (top * M.HOUR)) * 100).toFixed(1)}%">${segs}</span></button>`;
     })
     .join('');
-  const labels = s.map((c) => `<span class="${c.sick ? 'sick' : ''}">${esc(c.label)}</span>`).join('');
+  // Über jeder Beschriftung: roter Punkt = krank markiert, grüner Punkt = Ferien
+  const labels = s
+    .map((c) => `<span>${anySick || anyVac ? `<i class="mk">${c.sick ? '<i class="sick-dot"></i>' : ''}${c.vac ? '<i class="vac-dot"></i>' : ''}</i>` : ''}${esc(c.label)}</span>`)
+    .join('');
   const legendItems = [];
   if (rep.all && rep.byPlace.length > 1) {
     for (const id of M.placeIds().filter((x) => rep.byPlace.some((p) => p.id === x))) {
@@ -683,6 +696,7 @@ function columnChart(rep) {
     }
   }
   if (anySick) legendItems.push('<span><span class="dot sick-dot"></span> krank markiert</span>');
+  if (anyVac) legendItems.push('<span><span class="dot vac-dot"></span> Ferien</span>');
   const legend = legendItems.length ? `<div class="legend">${legendItems.join('')}</div>` : '';
   const half = String(top / 2).replace('.', ',');
   return `<section class="card">
@@ -695,7 +709,7 @@ function columnChart(rep) {
         <div class="grid-line base" style="bottom:0"><span>0</span></div>
         <div class="cols">${cols}</div>
       </div>
-      <div class="col-labels ${anySick ? 'has-sick' : ''}">${labels}</div>
+      <div class="col-labels">${labels}</div>
     </div>
     <p class="muted small" id="col-info">Tippe auf eine Säule, um die genaue Zeit zu sehen.</p>
   </section>`;
@@ -731,16 +745,35 @@ const repModeChips = () => `<div class="chips mode-chips">
     <button class="chip ${ui.repMode === 'zeit' ? 'on' : ''}" data-act="repMode" data-mode="zeit">Arbeitszeit</button>
     <button class="chip ${ui.repMode === 'steuer' ? 'on' : ''}" data-act="repMode" data-mode="steuer">Steuer-Tage</button>
     <button class="chip ${ui.repMode === 'krank' ? 'on' : ''}" data-act="repMode" data-mode="krank">Krankentage</button>
+    <button class="chip ${ui.repMode === 'ferien' ? 'on' : ''}" data-act="repMode" data-mode="ferien">Ferien</button>
   </div>`;
 
-// ---------- Krankentage: von Hand im Kalender markieren ----------
+// ---------- Kranken- und Ferientage: von Hand im Kalender markieren ----------
 
-const sickDays = () => state.settings.sickDays || [];
-// Sollen die Krankentage auch in den Statistiken zu sehen sein? (Schalter auf den Berichtsseiten)
+const sickDays = () => (Array.isArray(state.settings.sickDays) ? state.settings.sickDays : []);
+const vacDays = () => (Array.isArray(state.settings.vacDays) ? state.settings.vacDays : []);
+// Sollen Kranken- und Ferientage auch in den Statistiken zu sehen sein? (Schalter auf den Berichtsseiten)
 const showSick = () => state.settings.showSick !== false;
-const sickSwitch = () => `<label class="check slim"><input type="checkbox" data-change="showSick" ${showSick() ? 'checked' : ''}><span>Krankentage hier mit anzeigen</span></label>`;
-const sickLine = (n) => `<div class="tax-row"><span class="tax-name"><span class="sick-tag">krank</span> Als krank markiert${n.all !== n.work ? `<small>davon ${nDays(n.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(n.all)}</b></div>`;
+const showVac = () => state.settings.showVac !== false;
+const markSwitches = () => `<div class="switches">
+    <label class="check slim"><input type="checkbox" data-change="showSick" ${showSick() ? 'checked' : ''}><span>Krankentage hier mit anzeigen</span></label>
+    <label class="check slim"><input type="checkbox" data-change="showVac" ${showVac() ? 'checked' : ''}><span>Ferien hier mit anzeigen</span></label>
+  </div>`;
+const workdaysSmall = (n) => (n.all !== n.work ? `<small>davon ${nDays(n.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : '');
+const sickLine = (n) => `<div class="tax-row"><span class="tax-name"><span class="sick-tag">krank</span> Als krank markiert${workdaysSmall(n)}</span><b>${nDays(n.all)}</b></div>`;
 const keyToTs = (k) => new Date(`${k}T00:00`).getTime();
+const sickCount = (from, to) => dayCount(sickDays(), from, to);
+const vacCount = (from, to) => dayCount(vacDays(), from, to);
+// Text für eine Säule im Diagramm: „, 2 Tage krank markiert, 5 Ferientage“
+const colMarks = (c) => `${c.sick ? `, ${nDays(c.sick)} krank markiert` : ''}${c.vac ? `, ${c.vac} ${c.vac === 1 ? 'Ferientag' : 'Ferientage'}` : ''}`;
+
+// Bildschirm neu zeichnen, ohne dass er nach oben springt
+function renderKeepScroll() {
+  const view = $('#view');
+  const top = view.scrollTop;
+  render();
+  view.scrollTop = top;
+}
 
 // Einen Tag als krank markieren oder die Markierung wegnehmen
 function setSick(k, on) {
@@ -749,18 +782,55 @@ function setSick(k, on) {
   else set.delete(k);
   state.settings.sickDays = [...set].sort();
   saveSettings();
-  const view = $('#view');
-  const top = view.scrollTop;
-  render();
-  view.scrollTop = top;
+  renderKeepScroll();
+}
+
+// Tage als Ferien markieren oder die Markierung wegnehmen
+function setVac(keys, on) {
+  const set = new Set(vacDays());
+  for (const k of keys) {
+    if (on) set.add(k);
+    else set.delete(k);
+  }
+  state.settings.vacDays = [...set].sort();
+  saveSettings();
+  renderKeepScroll();
+}
+
+// Arbeitszeit an Ferientagen in einem Zeitraum: { days: Tage mit Arbeit, ms: Stunden }
+// place = 'all' oder ein Arbeitsort
+function vacWork(from, to, place = 'all') {
+  const t = now();
+  let days = 0;
+  let ms = 0;
+  for (const k of vacDays()) {
+    const ts = keyToTs(k);
+    if (ts < from || ts >= to) continue;
+    let sum = 0;
+    for (const b of state.blocks) if (place === 'all' || b.place === place) sum += M.netMs(b, t, ts, M.addDays(ts, 1));
+    if (sum > 0) {
+      days++;
+      ms += sum;
+    }
+  }
+  return { days, ms };
+}
+
+// Zeile für Berichte: Ferientage im Zeitraum und wie viel davon gearbeitet wurde
+function vacLines(from, to, place = 'all') {
+  const n = vacCount(from, to);
+  if (!n.all) return '';
+  const w = vacWork(from, to, place);
+  return `<div class="tax-row"><span class="tax-name"><span class="vac-tag">Ferien</span> Als Ferien markiert${workdaysSmall(n)}</span><b>${nDays(n.all)}</b></div>
+    <div class="tax-row"><span class="tax-name">In den Ferien gearbeitet<small>${w.days ? `an ${nDaysDat(w.days)}` : 'an keinem Ferientag'}${place === 'all' ? '' : ` am Arbeitsort „${esc(placeName(place))}“`}</small></span><b>${M.fmtDur(w.ms)} Std.</b></div>`;
 }
 
 // Zählt die markierten Tage in einem Zeitraum: alle und die an Werktagen (Mo–Fr, ohne Feiertage in NRW)
-function sickCount(from, to) {
+function dayCount(list, from, to) {
   let all = 0;
   let work = 0;
   const hol = new Map();
-  for (const k of sickDays()) {
+  for (const k of list) {
     const ts = keyToTs(k);
     if (ts < from || ts >= to) continue;
     all++;
@@ -773,8 +843,8 @@ function sickCount(from, to) {
 }
 
 // Aufeinanderfolgende Tage zusammenfassen: "03.11.–05.11.2026 (3 Tage)"
-function sickRanges(from, to) {
-  const list = sickDays().map(keyToTs).filter((ts) => ts >= from && ts < to).sort((a, b) => a - b);
+function dayRanges(keys, from, to) {
+  const list = keys.map(keyToTs).filter((ts) => ts >= from && ts < to).sort((a, b) => a - b);
   const out = [];
   for (const ts of list) {
     const last = out[out.length - 1];
@@ -785,11 +855,22 @@ function sickRanges(from, to) {
   }
   return out;
 }
+const dm = (ts) => `${M.pad(new Date(ts).getDate())}.${M.pad(new Date(ts).getMonth() + 1)}.`;
+const rangeText = (r) => (r.n === 1 ? M.fmtDate(r.from) : `${dm(r.from)}–${dm(r.to)}${new Date(r.to).getFullYear()}`);
+const rangeList = (title, keys, from, to) => {
+  const ranges = dayRanges(keys, from, to);
+  return ranges.length
+    ? `<section class="card"><h2>${title}</h2>${ranges.map((r) => `<div class="tax-row"><span class="tax-name">${rangeText(r)}</span><b>${nDays(r.n)}</b></div>`).join('')}</section>`
+    : '';
+};
 
-function viewSick() {
+// Kalender eines Monats zum Antippen. kind = 'sick' (Krankentage) oder 'vac' (Ferien)
+function markCalendar(kind) {
   const t = now();
-  const { y, m } = ui.sickMonth;
-  const sick = new Set(sickDays());
+  const sick = kind === 'sick';
+  const { y, m } = sick ? ui.sickMonth : ui.vacMonth;
+  const marked = new Set(sick ? sickDays() : vacDays());
+  const word = sick ? 'krank' : 'Ferien';
   const hol = holidaysNRW(y);
   const first = new Date(y, m, 1).getTime();
   const daysInMonth = new Date(y, m + 1, 0).getDate();
@@ -801,49 +882,103 @@ function viewSick() {
     const ts = M.addDays(first, d - 1);
     const k = M.dayKey(ts);
     const wd = new Date(ts).getDay();
-    const isSick = sick.has(k);
+    const on = marked.has(k);
     const worked = sumRange(t, ts, M.addDays(ts, 1)) > 0;
     const off = wd === 0 || wd === 6 || hol.has(k);
-    const label = `${M.fmtDate(ts)}${hol.has(k) ? `, ${hol.get(k)}` : ''}${isSick ? ', als krank markiert' : ''}${worked ? ', Arbeitszeit erfasst' : ''}`;
-    cells += `<button class="cal-day ${isSick ? 'sick' : ''} ${off ? 'off' : ''} ${k === todayKey ? 'today' : ''}" data-act="sickToggle" data-day="${k}" aria-pressed="${isSick}" aria-label="${esc(label)}" title="${esc(label)}">
-      <span class="cal-num">${d}</span><span class="cal-mark">${isSick ? 'krank' : worked ? '●' : ''}</span></button>`;
+    const label = `${M.fmtDate(ts)}${hol.has(k) ? `, ${hol.get(k)}` : ''}${on ? (sick ? ', als krank markiert' : ', Ferien') : ''}${worked ? ', Arbeitszeit erfasst' : ''}`;
+    // Bei den Ferien bleibt der Punkt für Arbeitszeit sichtbar: So sieht man, an welchen Ferientagen gearbeitet wurde.
+    const mark = on ? (!sick && worked ? `${word} ●` : word) : worked ? '●' : '';
+    cells += `<button class="cal-day ${on ? kind : ''} ${off ? 'off' : ''} ${k === todayKey ? 'today' : ''}" data-act="${kind}Toggle" data-day="${k}" aria-pressed="${on}" aria-label="${esc(label)}" title="${esc(label)}">
+      <span class="cal-num">${d}</span><span class="cal-mark">${mark}</span></button>`;
   }
+  return `<section class="card">
+    <div class="month-switch">
+      <button class="icon-btn" data-act="${kind}Month" data-d="-1" aria-label="Monat zurück">‹</button>
+      <strong>${M.MONTHS[m]} ${y}</strong>
+      <button class="icon-btn" data-act="${kind}Month" data-d="1" aria-label="Monat vor">›</button>
+    </div>
+    <div class="cal cal-head">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((w) => `<span>${w}</span>`).join('')}</div>
+    <div class="cal">${cells}</div>
+    <p class="muted small">● = an dem Tag ist Arbeitszeit erfasst. Wochenenden und Feiertage sind blasser.</p>
+  </section>`;
+}
 
+function viewSick() {
+  const { y, m } = ui.sickMonth;
+  const first = new Date(y, m, 1).getTime();
   const yearFrom = new Date(y, 0, 1).getTime();
   const yearTo = new Date(y + 1, 0, 1).getTime();
   const cy = sickCount(yearFrom, yearTo);
   const sjPer = period('schuljahr', first);
   const sj = sickCount(sjPer.from, sjPer.to);
-  const ranges = sickRanges(yearFrom, yearTo);
-  const dm = (ts) => `${M.pad(new Date(ts).getDate())}.${M.pad(new Date(ts).getMonth() + 1)}.`;
 
   return `<h2 class="page-title">Berichte</h2>
   ${repModeChips()}
   <p class="muted small">Tippe auf einen Tag, um ihn als krank zu markieren. Noch einmal tippen nimmt die Markierung wieder weg. Es wird sofort gespeichert.</p>
-  <section class="card">
-    <div class="month-switch">
-      <button class="icon-btn" data-act="sickMonth" data-d="-1" aria-label="Monat zurück">‹</button>
-      <strong>${M.MONTHS[m]} ${y}</strong>
-      <button class="icon-btn" data-act="sickMonth" data-d="1" aria-label="Monat vor">›</button>
+  ${markCalendar('sick')}
+  <section class="card"><h2>Gezählt</h2>
+    <div class="tax-row"><span class="tax-name">Kalenderjahr ${y}${workdaysSmall(cy)}</span><b>${nDays(cy.all)}</b></div>
+    <div class="tax-row"><span class="tax-name">${esc(sjPer.label)}${workdaysSmall(sj)}</span><b>${nDays(sj.all)}</b></div>
+  </section>
+  ${rangeList(`Krankentage ${y}`, sickDays(), yearFrom, yearTo)}`;
+}
+
+// Ferien: wie Krankentage selbst markieren, dazu „von … bis“ und die NRW-Ferien als Vorlage
+function viewVac() {
+  const { y, m } = ui.vacMonth;
+  const first = new Date(y, m, 1).getTime();
+  const yearFrom = new Date(y, 0, 1).getTime();
+  const yearTo = new Date(y + 1, 0, 1).getTime();
+  const sjPer = period('schuljahr', first);
+  const have = new Set(vacDays());
+
+  const presets = ferienNRW(sjPer.from, sjPer.to)
+    .map((f) => {
+      const n = f.keys.filter((k) => have.has(k)).length;
+      const all = n === f.keys.length;
+      const btn = all
+        ? `<button class="btn small ghost" data-act="vacPreset" data-from="${f.keys[0]}" data-to="${f.keys[f.keys.length - 1]}" data-on="0">Entfernen</button>`
+        : `<button class="btn small" data-act="vacPreset" data-from="${f.keys[0]}" data-to="${f.keys[f.keys.length - 1]}" data-on="1">${n ? 'Rest eintragen' : 'Eintragen'}</button>`;
+      const dates = f.keys.length === 1 ? M.fmtDate(f.from) : `${M.fmtDateShort(f.from)} – ${M.fmtDate(f.to)}`;
+      return `<div class="tax-row preset-row"><span class="tax-name">${esc(f.name)}${all ? ' <span class="vac-tag">✓ eingetragen</span>' : ''}<small>${dates} · ${nDays(f.keys.length)}</small></span>${btn}</div>`;
+    })
+    .join('');
+
+  const countRows = (label, from, to) => {
+    const n = vacCount(from, to);
+    const w = vacWork(from, to);
+    return `<div class="tax-row"><span class="tax-name">${label}${workdaysSmall(n)}</span><b>${nDays(n.all)}</b></div>
+      ${n.all ? `<div class="tax-row sub-row"><span class="tax-name">davon gearbeitet<small>${w.days ? `${M.fmtDur(w.ms)} Std. Arbeitszeit` : 'keine Arbeitszeit erfasst'}</small></span><b>${nDays(w.days)}</b></div>` : ''}`;
+  };
+
+  return `<h2 class="page-title">Berichte</h2>
+  ${repModeChips()}
+  <p class="muted small">Tippe auf einen Tag, um ihn als Ferientag zu markieren. Noch einmal tippen nimmt die Markierung wieder weg. Ganze Ferien trägst du weiter unten mit einem Tippen ein. Es wird sofort gespeichert.</p>
+  ${markCalendar('vac')}
+  <section class="card"><h2>NRW-Ferien im ${esc(sjPer.label)}</h2>
+    ${presets || '<p class="muted small">Für dieses Schuljahr sind noch keine Ferientermine eingebaut. Bitte trag die Ferien unten mit „von … bis“ ein.</p>'}
+    <p class="muted small">Termine nach der Ferienordnung des Schulministeriums NRW. Die beweglichen Ferientage legt deine Schule selbst fest. Die tippst du oben im Kalender an. Mit ‹ › am Kalender kommst du zu einem anderen Schuljahr.</p>
+  </section>
+  <section class="card"><h2>Selbst eintragen: von … bis</h2>
+    <div class="field-row">
+      <label class="label">Von<input type="date" data-change="vacDate" data-key="vacFrom" value="${esc(ui.vacFrom)}"></label>
+      <label class="label">Bis<input type="date" data-change="vacDate" data-key="vacTo" value="${esc(ui.vacTo)}"></label>
     </div>
-    <div class="cal cal-head">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((w) => `<span>${w}</span>`).join('')}</div>
-    <div class="cal">${cells}</div>
-    <p class="muted small">● = an dem Tag ist Arbeitszeit erfasst. Wochenenden und Feiertage sind blasser.</p>
+    <div class="btn-row">
+      <button class="btn small" data-act="vacRange" data-on="1">Als Ferien eintragen</button>
+      <button class="btn small ghost" data-act="vacRange" data-on="0">Markierung entfernen</button>
+    </div>
   </section>
   <section class="card"><h2>Gezählt</h2>
-    <div class="tax-row"><span class="tax-name">Kalenderjahr ${y}${cy.all !== cy.work ? `<small>davon ${nDays(cy.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(cy.all)}</b></div>
-    <div class="tax-row"><span class="tax-name">${esc(sjPer.label)}${sj.all !== sj.work ? `<small>davon ${nDays(sj.work)} an Werktagen (Mo–Fr, ohne Feiertage)</small>` : ''}</span><b>${nDays(sj.all)}</b></div>
+    ${countRows(`Kalenderjahr ${y}`, yearFrom, yearTo)}
+    ${countRows(esc(sjPer.label), sjPer.from, sjPer.to)}
+    <p class="muted small">Gezählt werden alle markierten Tage, auch Wochenenden. „Davon gearbeitet“ sind Ferientage, an denen du Arbeitszeit erfasst hast.</p>
   </section>
-  ${
-    ranges.length
-      ? `<section class="card"><h2>Krankentage ${y}</h2>${ranges
-          .map((r) => `<div class="tax-row"><span class="tax-name">${r.n === 1 ? M.fmtDate(r.from) : `${dm(r.from)}–${dm(r.to)}${new Date(r.to).getFullYear()}`}</span><b>${nDays(r.n)}</b></div>`)
-          .join('')}</section>`
-      : ''
-  }`;
+  ${rangeList(`Ferien ${y}`, vacDays(), yearFrom, yearTo)}`;
 }
 
 const nDays = (n) => `${n} ${n === 1 ? 'Tag' : 'Tage'}`;
+const nDaysDat = (n) => `${n} ${n === 1 ? 'Tag' : 'Tagen'}`; // „an 3 Tagen“
 
 // Übersicht für die Steuererklärung: an wie vielen Tagen wurde an welchem Ort gearbeitet?
 function viewTax() {
@@ -855,6 +990,11 @@ function viewTax() {
   const homeNames = M.allPlaces().filter((p) => p.home).map((p) => p.name);
   const sick = new Set(showSick() ? sickDays() : []);
   const sickN = showSick() ? sickCount(per.from, per.to) : { all: 0, work: 0 };
+  const vac = new Set(showVac() ? vacDays() : []);
+  const vacCard = showVac() ? vacLines(per.from, per.to) : '';
+  // Je Arbeitsort: an wie vielen Ferientagen dort gearbeitet wurde
+  const vacAt = {};
+  for (const mo of tax.months) for (const d of mo.days) if (vac.has(M.dayKey(d.ts))) for (const id of d.places) vacAt[id] = (vacAt[id] || 0) + 1;
 
   const head = `<h2 class="page-title">Berichte</h2>
   ${repModeChips()}
@@ -867,10 +1007,10 @@ function viewTax() {
     <strong>${esc(per.label)}</strong>
     <button class="icon-btn" data-act="taxShift" data-d="1" aria-label="Ein Jahr vor">›</button>
   </div>
-  ${sickSwitch()}`;
+  ${markSwitches()}`;
 
   if (!tax.totalDays) {
-    return `${head}${sickN.all ? `<section class="card">${sickLine(sickN)}</section>` : ''}
+    return `${head}${sickN.all ? `<section class="card">${sickLine(sickN)}</section>` : ''}${vacCard ? `<section class="card">${vacCard}</section>` : ''}
     <p class="muted empty">Für diesen Zeitraum (${esc(per.label)}) gibt es noch keine erfassten Zeiten.</p>`;
   }
 
@@ -878,6 +1018,7 @@ function viewTax() {
     .map((p) => {
       const sub = [];
       if (p.offDays) sub.push(`davon ${nDays(p.offDays)} am Wochenende oder Feiertag`);
+      if (vacAt[p.id]) sub.push(`davon ${nDays(vacAt[p.id])} in den Ferien`);
       return `<div class="tax-row place-${p.id}">
         <span class="dot"></span>
         <span class="tax-name">${M.placeOf(p.id).icon} ${esc(p.name)}${sub.length ? `<small>${sub.join(' · ')}</small>` : ''}</span>
@@ -923,12 +1064,14 @@ function viewTax() {
         ${m.days
           .map((d) => {
             const isSick = sick.has(M.dayKey(d.ts));
+            const isVac = vac.has(M.dayKey(d.ts));
+            const vacTag = isVac ? ' <span class="vac-tag">Ferien</span>' : '';
             const what = d.places.length
               ? d.places.map((id) => `<span class="place-${id}"><span class="dot"></span> ${esc(placeName(id))}</span>`).join(' ')
               : isSick
                 ? '<span class="sick-tag">krank</span>'
-                : `<span class="muted">${d.holiday ? esc(d.holiday) : d.weekend ? 'Wochenende' : 'keine Erfassung'}</span>`;
-            const extra = `${d.places.length && d.holiday ? ` <span class="muted">(${esc(d.holiday)})</span>` : ''}${d.places.length && isSick ? ' <span class="sick-tag">krank</span>' : ''}`;
+                : `<span class="muted">${d.holiday ? esc(d.holiday) : d.weekend ? 'Wochenende' : isVac ? '' : 'keine Erfassung'}</span>`;
+            const extra = `${d.places.length && d.holiday ? ` <span class="muted">(${esc(d.holiday)})</span>` : ''}${d.places.length && isSick ? ' <span class="sick-tag">krank</span>' : ''}${vacTag}`;
             return `<div class="tax-day ${d.places.length ? '' : 'none'} ${d.weekend || d.holiday ? 'off' : ''}"><span class="tax-date">${M.fmtDateShort(d.ts)}</span><span>${what}${extra}</span></div>`;
           })
           .join('')}
@@ -948,6 +1091,7 @@ function viewTax() {
       ? `<section class="card"><h2>Krankentage</h2>${sickLine(sickN)}</section>`
       : ''
   }
+  ${vacCard ? `<section class="card"><h2>Ferien</h2>${vacCard}</section>` : ''}
   <section class="card"><h2>Alle Tage im Überblick</h2>
     <p class="muted small">Tippe auf einen Monat, um die einzelnen Tage zu sehen.</p>
     ${months}</section>`;
@@ -956,6 +1100,7 @@ function viewTax() {
 function viewReport() {
   if (ui.repMode === 'steuer') return viewTax();
   if (ui.repMode === 'krank') return viewSick();
+  if (ui.repMode === 'ferien') return viewVac();
   const rep = currentReport();
   lastRep = rep;
   const share = canShareFiles();
@@ -964,7 +1109,8 @@ function viewReport() {
     ${share ? `<button class="btn small" data-act="exp" data-kind="${kind}" data-mode="share">Teilen</button>` : ''}</div>`;
   const where = rep.all ? '' : ` am Arbeitsort „${esc(rep.placeName)}“`;
   const sickN = showSick() ? sickCount(rep.period.from, rep.period.to) : { all: 0, work: 0 };
-  const sickCard = sickN.all ? `<section class="card">${sickLine(sickN)}</section>` : '';
+  const vacL = showVac() ? vacLines(rep.period.from, rep.period.to, rep.all ? 'all' : rep.place) : '';
+  const sickCard = sickN.all || vacL ? `<section class="card">${sickN.all ? sickLine(sickN) : ''}${vacL}</section>` : '';
 
   let body;
   if (!rep.rows.length) {
@@ -989,7 +1135,7 @@ function viewReport() {
   return `<h2 class="page-title">Berichte</h2>
   ${repModeChips()}
   ${repControls(rep.period)}
-  ${sickSwitch()}
+  ${markSwitches()}
   ${rep.openCount ? `<p class="note-box">Ein Arbeitsblock läuft noch. Er ist bis jetzt (${M.fmtTime(now())} Uhr) mitgezählt.</p>` : ''}
   ${body}`;
 }
@@ -1939,6 +2085,43 @@ const actions = {
     closeSheet();
     if (k) setSick(k, true);
   },
+  // --- Ferien ---
+  vacMonth(el) {
+    const d = new Date(ui.vacMonth.y, ui.vacMonth.m + Number(el.dataset.d), 1);
+    ui.vacMonth = { y: d.getFullYear(), m: d.getMonth() };
+    render();
+  },
+  vacToggle(el) {
+    const k = el.dataset.day;
+    setVac([k], !vacDays().includes(k));
+  },
+  // NRW-Ferien aus der Vorlage eintragen oder wieder entfernen
+  vacPreset(el) {
+    const keys = [];
+    for (let d = keyToTs(el.dataset.from); d <= keyToTs(el.dataset.to); d = M.addDays(d, 1)) keys.push(M.dayKey(d));
+    const on = el.dataset.on === '1';
+    setVac(keys, on);
+    toast(on ? `${nDays(keys.length)} als Ferien eingetragen.` : 'Die Markierung ist wieder weg.');
+  },
+  // Selbst gewählter Zeitraum „von … bis“
+  vacRange(el) {
+    const from = ui.vacFrom;
+    const to = ui.vacTo || ui.vacFrom;
+    if (!from) return toast('Bitte wähle zuerst, ab welchem Tag.');
+    if (to < from) return toast('Der Tag bei „Bis“ liegt vor dem Tag bei „Von“.');
+    const keys = [];
+    for (let d = keyToTs(from); d <= keyToTs(to); d = M.addDays(d, 1)) keys.push(M.dayKey(d));
+    if (keys.length > 120) return toast('Das sind mehr als 120 Tage. Bitte prüf die Daten noch einmal.');
+    const on = el.dataset.on === '1';
+    setVac(keys, on);
+    // Kalender springt zum Monat, in dem der Zeitraum beginnt
+    const f = new Date(keyToTs(from));
+    ui.vacMonth = { y: f.getFullYear(), m: f.getMonth() };
+    ui.vacFrom = '';
+    ui.vacTo = '';
+    render();
+    toast(on ? `${nDays(keys.length)} als Ferien eingetragen.` : `Bei ${nDaysDat(keys.length)} ist die Ferien-Markierung entfernt.`);
+  },
   taxShift(el) {
     ui.taxAnchor = shiftAnchor(ui.taxKind, ui.taxAnchor, Number(el.dataset.d));
     render();
@@ -1972,7 +2155,7 @@ const actions = {
     if (!c || !out) return;
     const ids = lastRep.all ? M.placeIds().filter((id) => c.parts[id] > 0) : [];
     const parts = ids.length > 1 ? ` (${ids.map((id) => `${placeName(id)} ${M.fmtDur(c.parts[id])}`).join(' · ')})` : ids.length === 1 ? ` (${placeName(ids[0])})` : '';
-    out.textContent = `${c.full}: ${M.fmtDur(c.ms)} Std.${parts}${c.sick ? ` · ${nDays(c.sick)} krank markiert` : ''}`;
+    out.textContent = `${c.full}: ${M.fmtDur(c.ms)} Std.${parts}${colMarks(c).replace(/^, /, ' · ')}`;
     out.classList.remove('muted');
     document.querySelectorAll('.cols .col').forEach((x) => x.classList.toggle('on', x === el));
     el.parentElement.classList.add('picked');
@@ -2079,6 +2262,7 @@ const actions = {
       const s = { ...state.settings, places: [...state.settings.places] };
       for (const p of inc.places) if (!s.places.some((q) => q.id === p.id)) s.places.push(p);
       s.sickDays = [...new Set([...(state.settings.sickDays || []), ...(r.settings.sickDays || [])])].sort();
+      s.vacDays = [...new Set([...(state.settings.vacDays || []), ...(Array.isArray(r.settings.vacDays) ? r.settings.vacDays : [])])].sort();
       if (!s.userName && inc.userName) s.userName = inc.userName;
       d = prepareData([...state.blocks, ...toSave], s);
     }
@@ -2121,6 +2305,7 @@ const actions = {
     const gone = new Set(ids);
     state.blocks = state.blocks.filter((b) => !gone.has(b.id));
     state.settings.sickDays = sickDays().filter((k) => !old.sick.includes(k));
+    state.settings.vacDays = vacDays().filter((k) => !old.vac.includes(k));
     saveSettings();
     closeSheet();
     render();
@@ -2213,10 +2398,22 @@ const changes = {
   showSick(el) {
     state.settings.showSick = el.checked;
     saveSettings();
-    const view = $('#view');
-    const top = view.scrollTop;
-    render();
-    view.scrollTop = top;
+    renderKeepScroll();
+  },
+  showVac(el) {
+    state.settings.showVac = el.checked;
+    saveSettings();
+    renderKeepScroll();
+  },
+  // Felder „von … bis“ auf der Ferien-Seite merken (der Bildschirm wird sonst neu gezeichnet)
+  vacDate(el) {
+    ui[el.dataset.key] = el.value;
+    // Ist „Bis“ noch leer oder liegt davor, gleich mitsetzen
+    if (el.dataset.key === 'vacFrom' && el.value && (!ui.vacTo || ui.vacTo < el.value)) {
+      ui.vacTo = el.value;
+      const other = document.querySelector('[data-key="vacTo"]');
+      if (other) other.value = el.value;
+    }
   },
 
   placeFlag(el) {
