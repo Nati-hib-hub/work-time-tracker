@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, monthPeriods, period
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.15 · Excel mit einem Blatt pro Monat';
+const VERSION = '0.16 · Excel teilen: lädt herunter, wenn das Handy es ablehnt';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -81,12 +81,12 @@ const saveSettings = () => store.putSettings(state.settings).catch(saveFailed);
 // ---------- Kleine Helfer ----------
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, ms = 3800) {
   const t = $('#toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 3800);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
 // "07:15 Uhr", "gestern 07:15 Uhr" oder "Mo 09.11., 07:15 Uhr"
@@ -187,17 +187,31 @@ function backupFile(forShare) {
 }
 
 // Datei herunterladen oder teilen. Gibt true zurück, wenn es geklappt hat.
-async function deliverFile(file, mode, title) {
+// saveIfRefused: Lehnt das Handy das Teilen dieser Dateiart ab, wird die Datei stattdessen heruntergeladen.
+// Grund: Chrome auf Android teilt keine Excel-Dateien (NotAllowedError, 15.11.2026), PDF dagegen schon.
+async function deliverFile(file, mode, title, saveIfRefused = false) {
   if (mode === 'share') {
     try {
       await navigator.share({ files: [file], title });
       return true;
     } catch (e) {
-      // Der Grund in Klammern hilft bei der Fehlersuche.
-      if (e.name !== 'AbortError') toast(`Teilen hat nicht geklappt (${e.name || 'Fehler'}). Versuche es mit „Herunterladen“.`);
-      return false;
+      if (e.name === 'AbortError') return false;
+      if (!saveIfRefused || e.name !== 'NotAllowedError') {
+        // Der Grund in Klammern hilft bei der Fehlersuche.
+        toast(`Teilen hat nicht geklappt (${e.name || 'Fehler'}). Versuche es mit „Herunterladen“.`);
+        return false;
+      }
+      saveFile(file);
+      toast('Dieses Handy lässt Excel-Dateien nicht direkt teilen. Die Datei liegt jetzt im Download-Ordner. Dort kannst du sie über die drei Punkte ⋮ teilen, z. B. nach OneDrive.', 9000);
+      return true;
     }
   }
+  saveFile(file);
+  toast('Die Datei liegt jetzt im Download-Ordner.');
+  return true;
+}
+
+function saveFile(file) {
   const url = URL.createObjectURL(file);
   const a = document.createElement('a');
   a.href = url;
@@ -206,8 +220,6 @@ async function deliverFile(file, mode, title) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 15000);
-  toast('Die Datei liegt jetzt im Download-Ordner.');
-  return true;
 }
 
 const backupBtns = () =>
@@ -2222,7 +2234,7 @@ const actions = {
       console.error(e);
       return toast('Der Bericht konnte nicht erstellt werden.');
     }
-    await deliverFile(file, el.dataset.mode, `${rep.title}, ${rep.label}`);
+    await deliverFile(file, el.dataset.mode, `${rep.title}, ${rep.label}`, !pdf);
   },
 
   // ----- Datensicherung -----
