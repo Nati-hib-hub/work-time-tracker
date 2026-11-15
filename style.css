@@ -11,6 +11,7 @@
   --go: #2b9259;
   --wait: #c97d14;
   --stop: #cf4238;
+  --night: #3f4f97;
   --btn-ink: #ffffff;
 
   /* Farben für die Arbeitsorte: Blau, Orange, Grün, Lila, Pink, Türkis, Braun, Grau */
@@ -46,6 +47,7 @@
   --go: #4cc083;
   --wait: #eba94a;
   --stop: #f0756c;
+  --night: #93a5ec;
   --btn-ink: #0d1416;
   --c0: #7aa3f2;
   --c1: #eda65c;
@@ -75,6 +77,7 @@
     --go: #4cc083;
     --wait: #eba94a;
     --stop: #f0756c;
+    --night: #93a5ec;
     --btn-ink: #0d1416;
     --c0: #7aa3f2;
     --c1: #eda65c;
@@ -245,6 +248,14 @@ h2 { font-size: 1rem; font-weight: 700; }
 .btn.go { background: var(--go); }
 .btn.wait { background: var(--wait); }
 .btn.stop { background: var(--stop); }
+.btn.night { background: var(--night); }
+/* Drei Knöpfe nebeneinander (Klassenfahrt: Pause, Nachtruhe, Stopp) */
+.actionbar.three { gap: 8px; }
+.actionbar.three .btn.big { font-size: 1.05rem; padding: 8px 6px; min-width: 0; }
+.status.night { background: var(--card); color: var(--text); border: 3px solid var(--night); }
+.ev-nacht .ev-name { color: var(--night); }
+.report .night-row td { color: var(--night); }
+.report tfoot .night-sum td { font-weight: 400; font-size: 0.88rem; color: var(--muted); white-space: normal; border-top: 0; }
 
 .actionbar {
   position: sticky;

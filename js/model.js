@@ -6,7 +6,20 @@ export const MIN = 60000;
 export const HOUR = 3600000;
 export const DAY = 86400000;
 
-export const LABEL = { start: 'Start', pause: 'Pause', weiter: 'Weiter', stopp: 'Stopp' };
+// 'nacht' = Nachtruhe bei Klassenfahrten (Anforderungen 4.3): zählt nur zu einem Anteil (Faktor f am Ereignis)
+export const LABEL = { start: 'Start', pause: 'Pause', weiter: 'Weiter', stopp: 'Stopp', nacht: 'Nachtruhe' };
+
+// Anteil, zu dem eine Nachtruhe zählt, falls am Ereignis keiner gespeichert ist
+export const NIGHT_DEFAULT = 0.5;
+export const nightFactor = (e) => (Number.isFinite(e.f) && e.f >= 0 && e.f <= 1 ? e.f : NIGHT_DEFAULT);
+export const pct = (f) => `${Math.round(f * 100)} %`;
+
+// Name eines Ereignisses im Protokoll. Nach einer Nachtruhe heißt „Weiter“ wie der Knopf: „Start“.
+export function evLabel(b, i) {
+  const e = b.events[i];
+  if (e.t === 'weiter' && i > 0 && b.events[i - 1].t === 'nacht') return 'Start';
+  return LABEL[e.t];
+}
 export const WEEKDAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 export const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 
@@ -126,6 +139,8 @@ export function defaultSettings() {
     warnPauseHours: 3,
     theme: 'auto', // Darstellung: 'auto' = wie das Handy, 'light' = hell, 'dark' = dunkel
     backupEvery: 'monat', // Erinnerung an die Sicherung: 'woche' oder 'monat'
+    nightPct: 50, // Nachtruhe bei Klassenfahrten zählt zu diesem Anteil (Prozent), gilt für neu eingetragene Nachtruhe
+    expNight: false, // Nachtruhe im PDF und in Excel mitzählen (Häkchen, anfangs aus: Entscheidung der Nutzerin 15.11.2026)
     // lastBackup    Zeitpunkt der letzten Sicherung (fehlt, solange es keine gab)
     // backupSnooze  „Später“ gedrückt: bis zu diesem Zeitpunkt keine Erinnerung
     // oldDataOk     Beginn des Zeitraums, für den „alte Daten behalten“ gewählt wurde
@@ -221,10 +236,11 @@ export function newBlock(place, ts) {
 export const lastEvent = (b) => b.events[b.events.length - 1];
 export const blockStart = (b) => b.events[0].ts;
 
-// 'running' = Uhr läuft, 'paused' = Pause, 'done' = gestoppt
+// 'running' = Uhr läuft, 'paused' = Pause, 'night' = Nachtruhe, 'done' = gestoppt
 export function stateOf(b) {
   const t = lastEvent(b).t;
   if (t === 'stopp') return 'done';
+  if (t === 'nacht') return 'night';
   return t === 'pause' ? 'paused' : 'running';
 }
 
@@ -232,7 +248,7 @@ export function blockEnd(b, now) {
   return stateOf(b) === 'done' ? lastEvent(b).ts : Math.max(now, lastEvent(b).ts);
 }
 
-// Zerlegt einen Block in Abschnitte: Arbeit ('work') und Pause ('pause').
+// Zerlegt einen Block in Abschnitte: Arbeit ('work'), Pause ('pause') und Nachtruhe ('night', mit Faktor f).
 // Die Notiz eines Arbeitsabschnitts gilt weiter, bis ein späterer Abschnitt eine eigene hat.
 export function segments(b, now) {
   const out = [];
@@ -244,6 +260,8 @@ export function segments(b, now) {
     const to = next ? next.ts : Math.max(now, e.ts);
     if (e.t === 'pause') {
       out.push({ kind: 'pause', from: e.ts, to, open: !next, idx: i });
+    } else if (e.t === 'nacht') {
+      out.push({ kind: 'night', from: e.ts, to, open: !next, idx: i, f: nightFactor(e) });
     } else {
       if (e.note) note = e.note;
       out.push({ kind: 'work', from: e.ts, to, open: !next, idx: i, note, ownNote: e.note || '' });
@@ -252,13 +270,28 @@ export function segments(b, now) {
   return out;
 }
 
-// Netto-Arbeitszeit (ohne Pausen), auf Wunsch nur der Teil zwischen from und to
+// Netto-Arbeitszeit (ohne Pausen), auf Wunsch nur der Teil zwischen from und to.
+// Nachtruhe zählt mit ihrem Anteil (z. B. zur Hälfte).
 export function netMs(b, now, from = -Infinity, to = Infinity) {
   let sum = 0;
   for (const s of segments(b, now)) {
-    if (s.kind === 'work') sum += Math.max(0, Math.min(s.to, to) - Math.max(s.from, from));
+    const part = Math.max(0, Math.min(s.to, to) - Math.max(s.from, from));
+    if (s.kind === 'work') sum += part;
+    else if (s.kind === 'night') sum += part * s.f;
   }
   return sum;
+}
+
+// Nachtruhe eines Blocks: raw = ganze Dauer, counted = davon gezählt
+export function nightMs(b, now) {
+  let raw = 0;
+  let counted = 0;
+  for (const s of segments(b, now)) {
+    if (s.kind !== 'night') continue;
+    raw += s.to - s.from;
+    counted += (s.to - s.from) * s.f;
+  }
+  return { raw, counted };
 }
 
 export function pauseMs(b, now) {
@@ -282,11 +315,11 @@ export function validate(b, now) {
     const p = ev[i - 1];
     const e = ev[i];
     let ok = false;
-    if (p.t === 'start' || p.t === 'weiter') ok = e.t === 'pause' || e.t === 'stopp';
-    else if (p.t === 'pause') ok = e.t === 'weiter' || e.t === 'stopp';
+    if (p.t === 'start' || p.t === 'weiter') ok = e.t === 'pause' || e.t === 'stopp' || e.t === 'nacht';
+    else if (p.t === 'pause' || p.t === 'nacht') ok = e.t === 'weiter' || e.t === 'stopp';
     if (!ok) return 'Die Reihenfolge im Protokoll stimmt nicht.';
     if (e.ts < p.ts) {
-      return `${LABEL[e.t]} (${fmtDateShort(e.ts)} ${fmtTime(e.ts)}) liegt vor ${LABEL[p.t]} (${fmtDateShort(p.ts)} ${fmtTime(p.ts)}). Bitte die Uhrzeit anpassen.`;
+      return `${evLabel(b, i)} (${fmtDateShort(e.ts)} ${fmtTime(e.ts)}) liegt vor ${evLabel(b, i - 1)} (${fmtDateShort(p.ts)} ${fmtTime(p.ts)}). Bitte die Uhrzeit anpassen.`;
     }
   }
   if (lastEvent(b).ts > now + MIN) return 'Die Uhrzeit liegt in der Zukunft.';

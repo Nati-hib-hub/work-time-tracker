@@ -226,6 +226,11 @@ export function reportPdf(rep) {
   const cellsOf = (row) => {
     if (row.type === 'work') return [dateOf(row), fmtTime(row.from), fmtTime(row.to), '', fmtDur(row.ms), row.note];
     if (row.type === 'pause') return ['', '', '', `${fmtTime(row.from)}–${fmtTime(row.to)}`, '', ''];
+    // Nachtruhe bei Klassenfahrten: eigene Zeile, bei „Stunden“ steht der gezählte Anteil
+    if (row.type === 'night') {
+      if (rep.detailed) return [dateOf(row), fmtTime(row.from), fmtTime(row.to), '', fmtDur(row.ms), row.text];
+      return [dateOf(row), ...(rep.all ? [''] : []), 'Nachtruhe', fmtTime(row.from), fmtTime(row.to), '', fmtDur(row.ms), row.text];
+    }
     return [
       dateOf(row),
       ...(rep.all ? [row.placeName] : []),
@@ -267,12 +272,17 @@ export function reportPdf(rep) {
     doc.line(L, y, R, y, 0.82, 0.5);
   }
 
-  if (y + 30 > BOTTOM) header(false);
+  if (y + 30 + (rep.nightText ? 14 : 0) > BOTTOM) header(false);
   doc.line(L, y, R, y, 0.3, 1);
   y += 17;
   doc.text(L + PADX, y, rep.period.sumLabel, { size: 10.5, bold: true });
   doc.text(hours.x + hours.w - PADX, y, fmtDur(rep.totalMs), { size: 10.5, bold: true, align: 'right' });
   doc.text(afterHours.x + PADX, y, 'Stunden', { size: 10.5 });
+  // Nachtruhe bei Klassenfahrten: wie viel davon in der Summe steckt
+  if (rep.nightText) {
+    y += 14;
+    doc.text(L + PADX, y, rep.nightText, { size: FS });
+  }
 
   // Auf Wunsch: Kranken- und Ferientage unter der Summe
   if (rep.marks && rep.marks.lines.length) {

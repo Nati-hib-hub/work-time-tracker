@@ -8,7 +8,7 @@
 
 import {
   DAY, MONTHS, WEEKDAYS,
-  addDays, blockNotes, blockStart, dayKey, defaultCategory, fmtDate, isDetailed, pad, segments, startOfDay, stateOf,
+  addDays, blockNotes, blockStart, dayKey, defaultCategory, fmtDate, fmtDur, isDetailed, pad, pct, segments, startOfDay, stateOf,
 } from './model.js';
 
 export const PERIOD_KINDS = [
@@ -187,9 +187,14 @@ const UNIT = (per) => {
   return days <= 31 ? 'Tag' : days <= 125 ? 'Woche' : 'Monat';
 };
 
+// Text für eine Zeile „Nachtruhe“ im Bericht
+const nightRowText = (raw, f) => `Nachtruhe ${fmtDur(raw)} Std., davon ${pct(f)} gezählt`;
+
 // Baut den Bericht. place ist die Kennung eines Arbeitsorts oder 'all' für alle.
 // names = { place(id) -> Name des Orts, user: Name der Nutzerin }
-export function buildReport(blocks, per, place, now, names) {
+// opts.night = false: Nachtruhe bei Klassenfahrten weder aufführen noch mitzählen (Häkchen beim Speichern)
+export function buildReport(blocks, per, place, now, names, opts = {}) {
+  const withNight = opts.night !== false;
   const all = place === 'all';
   const detailed = !all && isDetailed(place);
   const list = blocks.filter((b) => all || b.place === place).sort((a, b) => blockStart(a) - blockStart(b));
@@ -201,19 +206,24 @@ export function buildReport(blocks, per, place, now, names) {
   let totalMs = 0;
   let openCount = 0;
   let blockCount = 0;
+  let nightRaw = 0;
+  let nightCounted = 0;
+  const nightFactors = new Set();
 
   for (const b of list) {
-    // Nur der Teil, der im Zeitraum liegt
+    // Nur der Teil, der im Zeitraum liegt. Ohne Nachtruhe wird sie zur Lücke ('gap'), die nicht zählt.
     const segs = [];
     for (const s of segments(b, now)) {
       if (s.kind === 'pause' && s.open) continue;
       const from = Math.max(s.from, per.from);
       const to = Math.min(s.to, per.to);
       const inside = to > from || (s.from === s.to && s.from >= per.from && s.from < per.to);
-      if (inside) segs.push({ ...s, from, to });
+      if (!inside) continue;
+      segs.push({ ...s, from, to, kind: s.kind === 'night' && !withNight ? 'gap' : s.kind });
     }
-    while (segs.length && segs[0].kind === 'pause') segs.shift();
-    while (segs.length && segs[segs.length - 1].kind === 'pause') segs.pop();
+    const edge = (s) => s.kind === 'pause' || s.kind === 'gap';
+    while (segs.length && edge(segs[0])) segs.shift();
+    while (segs.length && edge(segs[segs.length - 1])) segs.pop();
     if (!segs.length) continue;
 
     const open = stateOf(b) !== 'done';
@@ -222,17 +232,29 @@ export function buildReport(blocks, per, place, now, names) {
 
     let ms = 0;
     let pause = 0;
+    let hasNight = false;
     for (const s of segs) {
       if (s.kind === 'pause') {
         pause += s.to - s.from;
         continue;
       }
-      ms += s.to - s.from;
+      if (s.kind === 'gap') {
+        hasNight = true;
+        continue;
+      }
+      const f = s.kind === 'night' ? s.f : 1;
+      if (s.kind === 'night') {
+        hasNight = true;
+        nightRaw += s.to - s.from;
+        nightCounted += (s.to - s.from) * f;
+        nightFactors.add(f);
+      }
+      ms += (s.to - s.from) * f;
       for (const c of series) {
         const part = Math.min(s.to, c.to) - Math.max(s.from, c.from);
         if (part > 0) {
-          c.ms += part;
-          c.parts[b.place] = (c.parts[b.place] || 0) + part;
+          c.ms += part * f;
+          c.parts[b.place] = (c.parts[b.place] || 0) + part * f;
         }
       }
     }
@@ -244,6 +266,23 @@ export function buildReport(blocks, per, place, now, names) {
     if (detailed) {
       let lastDay = '';
       for (const s of segs) {
+        if (s.kind === 'gap') continue;
+        if (s.kind === 'night') {
+          rows.push({
+            type: 'night',
+            id: b.id,
+            date: lastDay ? '' : fmtDate(s.from),
+            first: !lastDay,
+            from: s.from,
+            to: s.to,
+            raw: s.to - s.from,
+            ms: (s.to - s.from) * s.f,
+            f: s.f,
+            text: nightRowText(s.to - s.from, s.f),
+          });
+          if (!lastDay) lastDay = dayKey(s.from);
+          continue;
+        }
         if (s.kind === 'work') {
           const day = dayKey(s.from);
           rows.push({
@@ -262,26 +301,79 @@ export function buildReport(blocks, per, place, now, names) {
         }
       }
     } else {
-      const first = segs[0];
-      const last = segs[segs.length - 1];
-      const lastDay = last.to > first.from ? last.to - 1 : last.to;
-      const multiDay = dayKey(first.from) !== dayKey(lastDay);
-      rows.push({
-        type: 'block',
-        id: b.id,
-        date: multiDay ? `${fmtDate(first.from)} bis ${fmtDate(lastDay)}` : fmtDate(first.from),
-        first: true,
-        place: b.place,
-        placeName: names.place(b.place),
-        category,
-        from: first.from,
-        to: last.to,
-        pauseMs: pause,
-        ms,
-        note: blockNotes(b).join(' · '),
-      });
+      // Eine Zeile für einen Teil des Blocks (ohne Nachtruhe: für den ganzen Block)
+      const blockRow = (ps, isFirst, note) => {
+        const first = ps[0];
+        const last = ps[ps.length - 1];
+        const lastDay = last.to > first.from ? last.to - 1 : last.to;
+        const multiDay = dayKey(first.from) !== dayKey(lastDay);
+        let p = 0;
+        let w = 0;
+        for (const s of ps) {
+          if (s.kind === 'pause') p += s.to - s.from;
+          else w += s.to - s.from;
+        }
+        return {
+          type: 'block',
+          id: b.id,
+          date: multiDay ? `${fmtDate(first.from)} bis ${fmtDate(lastDay)}` : fmtDate(first.from),
+          first: isFirst,
+          place: b.place,
+          placeName: names.place(b.place),
+          category,
+          from: first.from,
+          to: last.to,
+          pauseMs: p,
+          ms: w,
+          note,
+        };
+      };
+      if (!hasNight) {
+        rows.push({ ...blockRow(segs, true, blockNotes(b).join(' · ')), pauseMs: pause, ms });
+      } else {
+        // Klassenfahrt mit Nachtruhe: Tag für Tag eine Zeile, dazwischen jede Nachtruhe als eigene Zeile
+        let cur = [];
+        let count = 0;
+        const flush = () => {
+          if (!cur.length) return;
+          // Nur die eigenen Notizen dieses Tages. Die erste Zeile im Bericht übernimmt sonst die Notiz von davor.
+          const notes = [];
+          for (const s of cur) if (s.kind === 'work' && s.ownNote && !notes.includes(s.ownNote)) notes.push(s.ownNote);
+          const w = cur.find((s) => s.kind === 'work');
+          if (!notes.length && count === 0 && w && w.note) notes.push(w.note);
+          rows.push(blockRow(cur, count === 0, notes.join(' · ')));
+          count++;
+          cur = [];
+        };
+        for (const s of segs) {
+          if (s.kind === 'night' || s.kind === 'gap') {
+            flush();
+            if (s.kind === 'night') {
+              rows.push({
+                type: 'night',
+                id: b.id,
+                date: count === 0 ? fmtDate(s.from) : '',
+                first: count === 0,
+                place: b.place,
+                from: s.from,
+                to: s.to,
+                raw: s.to - s.from,
+                ms: (s.to - s.from) * s.f,
+                f: s.f,
+                text: nightRowText(s.to - s.from, s.f),
+              });
+              count++;
+            }
+          } else cur.push(s);
+        }
+        flush();
+      }
     }
   }
+  const fs = [...nightFactors];
+  const nightText = nightRaw > 0
+    ? `davon Nachtruhe: ${fmtDur(nightCounted)} Std. gezählt (${fmtDur(nightRaw)} Std. Nachtruhe, ${fs.length === 1 ? `zu ${pct(fs[0])}` : 'zu unterschiedlichen Anteilen'})`
+    : '';
 
   const placeName = all ? 'Alle Arbeitsorte' : names.place(place);
   return {
@@ -296,6 +388,9 @@ export function buildReport(blocks, per, place, now, names) {
     fileLabel: all ? 'Gesamt' : placeName,
     rows,
     totalMs,
+    nightRaw, // Nachtruhe im Zeitraum (ganze Dauer), 0 wenn keine oder nicht mitgezählt
+    nightMs: nightCounted, // davon gezählt (steckt schon in totalMs)
+    nightText, // Zeile unter der Summe, z. B. „davon Nachtruhe: 8:15 Std. gezählt (16:30 Std. Nachtruhe, zu 50 %)“
     openCount,
     blockCount,
     byPlace: Object.keys(placeMs)

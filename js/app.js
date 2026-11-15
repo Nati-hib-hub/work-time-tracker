@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, monthPeriods, period
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.16 · Excel teilen: lädt herunter, wenn das Handy es ablehnt';
+const VERSION = '0.17 · Nachtruhe bei Klassenfahrten';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -388,15 +388,16 @@ function adoptData(d) {
 function blockItem(b, t) {
   const st = M.stateOf(b);
   const from = M.fmtTime(M.blockStart(b));
-  const to = st === 'done' ? M.fmtTime(M.lastEvent(b).ts) : st === 'paused' ? 'Pause' : 'läuft';
+  const to = st === 'done' ? M.fmtTime(M.lastEvent(b).ts) : st === 'paused' ? 'Pause' : st === 'night' ? 'Nachtruhe' : 'läuft';
   const p = M.pauseMs(b, t);
+  const n = M.nightMs(b, t);
   const notes = M.blockNotes(b).join(' · ');
   const cat = b.category ? ` · ${esc(b.category)}` : '';
   return `<button class="item place-${b.place}" data-act="openDetail" data-id="${b.id}">
     <span class="dot"></span>
     <span class="item-main">
       <span class="item-title">${placeLabel(b.place)}${cat}</span>
-      <span class="item-sub">${from}–${to}${p > 0 ? ` · Pause ${M.fmtDur(p)}` : ''}</span>
+      <span class="item-sub">${M.dayKey(M.blockStart(b)) !== M.dayKey(M.blockEnd(b, t)) && st === 'done' ? `${from} bis ${M.fmtDateShort(M.lastEvent(b).ts)} ${to}` : `${from}–${to}`}${p > 0 ? ` · Pause ${M.fmtDur(p)}` : ''}${n.raw > 0 ? ` · 🌙 Nachtruhe ${M.fmtDur(n.raw)}` : ''}</span>
       ${notes ? `<span class="item-note">${esc(notes)}</span>` : ''}
     </span>
     <span class="item-dur">${M.fmtDur(M.netMs(b, t))}</span>
@@ -470,11 +471,16 @@ function viewHome() {
   } else {
     const st = M.stateOf(b);
     const last = M.lastEvent(b);
-    const sub = st === 'running' ? `Uhr läuft · Start ${fmtWhen(M.blockStart(b), t)}` : `Pause seit ${fmtWhen(last.ts, t)}`;
+    const sub =
+      st === 'running'
+        ? `Uhr läuft · Start ${fmtWhen(M.blockStart(b), t)}`
+        : st === 'night'
+          ? `Nachtruhe seit ${fmtWhen(last.ts, t)} · zählt zu ${M.pct(M.nightFactor(last))}`
+          : `Pause seit ${fmtWhen(last.ts, t)}`;
     h += `<section class="status place-${b.place} ${st}">
       <div class="status-place">${placeLabel(b.place)}</div>
       <div class="status-big" id="live-net">${M.fmtDur(M.netMs(b, t))}</div>
-      <div class="status-sub">${st === 'paused' ? '⏸ ' : ''}${esc(sub)}</div>
+      <div class="status-sub">${st === 'paused' ? '⏸ ' : st === 'night' ? '🌙 ' : ''}${esc(sub)}</div>
       <div class="status-today">Heute insgesamt: <b id="live-today">${M.fmtDur(todayMs)}</b> Std.</div>
     </section>`;
 
@@ -508,10 +514,16 @@ function viewHome() {
   }</section>`;
 
   let bar;
+  // Bei Klassenfahrten gibt es zusätzlich den Knopf „Nachtruhe“ (Anforderungen 4.3)
+  const trip = b && M.placeOf(b.place).trip;
   if (!b) bar = `<button class="btn big go" data-act="start">▶ Start</button>`;
-  else if (M.stateOf(b) === 'running') bar = `<button class="btn big wait" data-act="pause">⏸ Pause</button><button class="btn big stop" data-act="stopp">■ Stopp</button>`;
+  else if (M.stateOf(b) === 'running') bar = `<button class="btn big wait" data-act="pause">⏸ Pause</button>${trip ? '<button class="btn big night" data-act="nacht">🌙 Nachtruhe</button>' : ''}<button class="btn big stop" data-act="stopp">■ Stopp</button>`;
+  else if (M.stateOf(b) === 'night') bar = `<button class="btn big go" data-act="weiter">▶ Start</button><button class="btn big stop" data-act="stopp">■ Stopp</button>`;
   else bar = `<button class="btn big go" data-act="weiter">▶ Weiter</button><button class="btn big stop" data-act="stopp">■ Stopp</button>`;
-  h += `<div class="actionbar">${bar}</div>`;
+  if (b && M.stateOf(b) === 'night') {
+    h += '<p class="muted small center">Musst du nachts aufstehen oder ist es Morgen? Tippe auf „Start“. Am letzten Tag beendest du die Fahrt nach dem Start mit „Stopp“.</p>';
+  }
+  h += `<div class="actionbar ${trip && M.stateOf(b) === 'running' ? 'three' : ''}">${bar}</div>`;
   return h;
 }
 
@@ -525,13 +537,15 @@ function viewDetail(b) {
   const rows = b.events
     .map(
       (e, i) => `<button class="ev ev-${e.t}" data-act="evEdit" data-idx="${i}">
-        <span class="ev-name">${M.LABEL[e.t]}</span>
+        <span class="ev-name">${M.evLabel(b, i)}${e.t === 'nacht' ? ` <small class="muted">(${M.pct(M.nightFactor(e))})</small>` : ''}</span>
         <span class="ev-time">${M.dayKey(e.ts) !== d0 ? `${M.fmtDateShort(e.ts)} ` : ''}${M.fmtTime(e.ts)}</span>
         <span class="ev-edit">ändern ›</span>
       </button>`
     )
     .join('');
-  const stateLine = st === 'done' ? '' : `<p class="muted open-line">${st === 'running' ? 'Die Uhr läuft noch.' : 'Gerade ist Pause.'}</p>`;
+  const stateLine = st === 'done' ? '' : `<p class="muted open-line">${st === 'running' ? 'Die Uhr läuft noch.' : st === 'night' ? 'Gerade ist Nachtruhe.' : 'Gerade ist Pause.'}</p>`;
+  const night = M.nightMs(b, t);
+  const canNight = M.placeOf(b.place).trip || night.raw > 0;
 
   const work = M.segments(b, t).filter((s) => s.kind === 'work');
   let notes;
@@ -553,6 +567,7 @@ function viewDetail(b) {
       <div class="muted">${M.fmtDate(M.blockStart(b))}</div>
     </div></div>
     <div class="detail-sum"><b>${M.fmtDur(M.netMs(b, t))}</b> Std. netto${p > 0 ? ` <span class="muted">· Pausen ${M.fmtDur(p)}</span>` : ''}</div>
+    ${night.raw > 0 ? `<p class="muted small">Darin enthalten: 🌙 Nachtruhe ${M.fmtDur(night.raw)} Std., davon gezählt ${M.fmtDur(night.counted)} Std.</p>` : ''}
   </section>
   <section class="card">
     <h2>Protokoll</h2>
@@ -561,6 +576,7 @@ function viewDetail(b) {
     ${stateLine}
     <div class="row-btns">
       <button class="btn small" data-act="addPause">＋ Pause nachtragen</button>
+      ${canNight ? '<button class="btn small" data-act="addNight">＋ Nachtruhe nachtragen</button>' : ''}
       ${st !== 'done' ? `<button class="btn small" data-act="addEnd">Ende eintragen</button>` : ''}
     </div>
   </section>
@@ -618,8 +634,9 @@ function viewHistory() {
 
 const repPeriod = () => period(ui.rep.kind, ui.rep.anchor, { from: ui.rep.from, to: ui.rep.to });
 
-function currentReport(per = repPeriod()) {
-  return buildReport(state.blocks, per, ui.rep.place, now(), { place: placeName, user: state.settings.userName });
+// night = false: Nachtruhe bei Klassenfahrten weder aufführen noch mitzählen (Häkchen beim Speichern)
+function currentReport(per = repPeriod(), night = true) {
+  return buildReport(state.blocks, per, ui.rep.place, now(), { place: placeName, user: state.settings.userName }, { night });
 }
 
 let shareOk = null;
@@ -739,8 +756,12 @@ function reportTable(rep) {
       if (r.type === 'pause') {
         return `<tr class="pause-row" ${open}><td></td><td></td><td></td><td>${M.fmtTime(r.from)}–${M.fmtTime(r.to)}</td><td></td></tr>`;
       }
+      if (r.type === 'night') {
+        return `<tr class="night-row ${r.first ? 'first' : ''}" ${open}><td>${esc(r.date)}</td><td>${M.fmtTime(r.from)}</td><td>${M.fmtTime(r.to)}</td><td></td><td class="num">${M.fmtDur(r.ms)}</td></tr>
+          <tr class="note-tr" ${open}><td colspan="5">🌙 ${esc(r.text)}</td></tr>`;
+      }
       const what = `${rep.all ? `${placeLabel(r.place)} · ` : ''}${esc(r.category)}`;
-      return `<tr class="first" ${open}><td>${esc(r.date)}</td><td>${M.fmtTime(r.from)}</td><td>${M.fmtTime(r.to)}</td><td>${r.pauseMs > 0 ? M.fmtDur(r.pauseMs) : ''}</td><td class="num">${M.fmtDur(r.ms)}</td></tr>
+      return `<tr class="${r.first ? 'first' : ''}" ${open}><td>${esc(r.date)}</td><td>${M.fmtTime(r.from)}</td><td>${M.fmtTime(r.to)}</td><td>${r.pauseMs > 0 ? M.fmtDur(r.pauseMs) : ''}</td><td class="num">${M.fmtDur(r.ms)}</td></tr>
         <tr class="note-tr place-${r.place}" ${open}><td colspan="5"><span class="dot"></span> <b>${what}</b>${r.note ? `<br>${esc(r.note)}` : ''}</td></tr>`;
     })
     .join('');
@@ -749,7 +770,8 @@ function reportTable(rep) {
   <div class="table-wrap"><table class="report">
     <thead><tr><th>Datum</th><th>Von</th><th>Bis</th><th>Pause</th><th class="num">Std.</th></tr></thead>
     <tbody>${rows}</tbody>
-    <tfoot><tr><td colspan="4">${esc(rep.period.sumLabel.replace(' (ohne Pausen)', ''))}</td><td class="num">${M.fmtDur(rep.totalMs)}</td></tr></tfoot>
+    <tfoot><tr><td colspan="4">${esc(rep.period.sumLabel.replace(' (ohne Pausen)', ''))}</td><td class="num">${M.fmtDur(rep.totalMs)}</td></tr>
+    ${rep.nightText ? `<tr class="night-sum"><td colspan="5">${esc(rep.nightText)}</td></tr>` : ''}</tfoot>
   </table></div>`;
 }
 
@@ -1160,7 +1182,7 @@ function viewReport() {
   if (!rep.rows.length) {
     body = `${sickCard}<p class="muted empty">Für diesen Zeitraum (${esc(rep.label)}) gibt es noch keine Zeiten${where}.</p>`;
   } else {
-    body = `<section class="summary"><span>${esc(rep.period.sumLabel.replace(' (ohne Pausen)', ''))}${rep.all ? '' : `<br><small>${esc(rep.placeName)}</small>`}</span><b>${M.fmtDur(rep.totalMs)} Std.</b></section>
+    body = `<section class="summary"><span>${esc(rep.period.sumLabel.replace(' (ohne Pausen)', ''))}${rep.all ? '' : `<br><small>${esc(rep.placeName)}</small>`}${rep.nightText ? `<br><small>🌙 ${esc(rep.nightText)}</small>` : ''}</span><b>${M.fmtDur(rep.totalMs)} Std.</b></section>
     ${sickCard}
     ${
       rep.all
@@ -1175,7 +1197,9 @@ function viewReport() {
       <div class="switches exp-switches">
         <label class="check slim"><input type="checkbox" data-change="expMark" data-key="expSick" ${state.settings.expSick ? 'checked' : ''}><span>Krankentage im PDF und in Excel mit aufführen</span></label>
         <label class="check slim"><input type="checkbox" data-change="expMark" data-key="expVac" ${state.settings.expVac ? 'checked' : ''}><span>Ferien im PDF und in Excel mit aufführen</span></label>
+        ${rep.nightRaw > 0 ? `<label class="check slim"><input type="checkbox" data-change="expMark" data-key="expNight" ${state.settings.expNight ? 'checked' : ''}><span>Nachtruhe (Klassenfahrt) im PDF und in Excel mitzählen</span></label>` : ''}
       </div>
+      ${rep.nightRaw > 0 ? '<p class="muted small">Ohne Häkchen bei „Nachtruhe“ stehen im PDF und in Excel nur die Zeiten ohne Nachtruhe, und die Summe ist entsprechend kleiner.</p>' : ''}
       ${exportBtns('pdf', 'PDF')}${exportBtns('xlsx', 'Excel')}
       ${monthPeriods(rep.period).length ? '<p class="muted small">In Excel bekommt jeder Monat ein eigenes Blatt. Vorne steht eine Übersicht mit allen Monaten.</p>' : ''}
       ${!rep.userName ? '<p class="muted small">Dein Name fehlt noch in der Kopfzeile. Du kannst ihn unter „Einstellungen“ eintragen.</p>' : ''}</section>
@@ -1255,6 +1279,12 @@ function viewSettings() {
     <label class="label" for="set-pause">Nachfragen, wenn eine Pause länger dauert als (Stunden)</label>
     <input id="set-pause" type="number" inputmode="numeric" min="1" max="48" data-input="set" data-key="warnPauseHours" value="${s.warnPauseHours}">
     <p class="muted small">Bei Klassenfahrten gibt es diese Hinweise nicht.</p>
+  </section>
+  <section class="card">
+    <h2>Klassenfahrt: Nachtruhe</h2>
+    <label class="label" for="set-night">Nachtruhe zählt als Arbeitszeit zu (Prozent)</label>
+    <input id="set-night" type="number" inputmode="numeric" min="0" max="100" step="5" data-input="set" data-key="nightPct" value="${nightPct()}">
+    <p class="muted small">Standard ist 50, also zur Hälfte. Eine Änderung gilt für jede Nachtruhe, die du ab jetzt einträgst. Frühere Fahrten bleiben, wie sie sind. Den Knopf „Nachtruhe“ gibt es bei Arbeitsorten mit Häkchen „Klassenfahrt oder Ausflug“.</p>
   </section>
   <p class="muted small center">Work Time Tracker · Version ${VERSION}<br>Alle Daten liegen nur auf diesem Gerät.</p>
   <button class="btn ghost" data-act="checkVersion">🔄 Nach neuer Fassung suchen</button>`;
@@ -1365,11 +1395,22 @@ const readDT = (prefix) => M.combine($(`#${prefix}-date`).value, $(`#${prefix}-t
 function sheetEvent(b, idx) {
   const e = b.events[idx];
   let extra = '';
-  if (e.t === 'pause' || e.t === 'weiter') extra = `<button class="btn danger-ghost" data-act="pauseDel">Diese Pause löschen</button>`;
+  // Gehört das Ereignis zu einer Nachtruhe? (Beginn der Nachtruhe oder der Start danach)
+  const isNight = e.t === 'nacht' || (e.t === 'weiter' && idx > 0 && b.events[idx - 1].t === 'nacht');
+  if (e.t === 'pause' || e.t === 'weiter' || e.t === 'nacht') {
+    extra = `<button class="btn danger-ghost" data-act="pauseDel">${isNight ? 'Diese Nachtruhe löschen' : 'Diese Pause löschen'}</button>`;
+  }
   if (e.t === 'stopp' && !openBlock()) extra = `<button class="btn danger-ghost" data-act="stoppDel">Stopp entfernen (die Uhr läuft dann wieder)</button>`;
+  // Bei der Nachtruhe lässt sich auch der Anteil ändern, zu dem sie zählt
+  const factor =
+    e.t === 'nacht'
+      ? `<label class="label" for="ev-f">Diese Nachtruhe zählt zu (Prozent)</label>
+         <input id="ev-f" type="number" inputmode="numeric" min="0" max="100" step="5" value="${Math.round(M.nightFactor(e) * 100)}">`
+      : '';
   openSheet(
-    `<h2>${M.LABEL[e.t]} ändern</h2>
+    `<h2>${M.evLabel(b, idx)} ändern</h2>
     ${dtFields('ev', e.ts)}
+    ${factor}
     ${ERR}
     <button class="btn primary" data-act="evSave">Speichern</button>
     ${extra}
@@ -1393,6 +1434,39 @@ function sheetAddPause(b) {
     <button class="btn primary" data-act="addPauseSave">Pause eintragen</button>
     ${CANCEL}`,
     { type: 'addPause', id: b.id }
+  );
+}
+
+// Nachtruhe nachtragen (Klassenfahrt). Vorschlag: die erste Nacht 22:00 bis 06:30, die noch frei ist.
+function sheetAddNight(b) {
+  const t = now();
+  const work = M.segments(b, t).filter((s) => s.kind === 'work');
+  const day0 = M.startOfDay(M.blockStart(b));
+  let from = null;
+  for (let d = 0; d < 30 && from == null; d++) {
+    const a = M.combine(M.dayKey(M.addDays(day0, d)), '22:00');
+    const z = M.combine(M.dayKey(M.addDays(day0, d + 1)), '06:30');
+    if (work.some((s) => s.from <= a && z <= s.to)) from = a;
+  }
+  const a = from == null ? M.combine(M.dayKey(day0), '22:00') : from;
+  const z = M.combine(M.dayKey(M.addDays(M.startOfDay(a), 1)), '06:30');
+  openSheet(
+    `<h2>Nachtruhe nachtragen</h2>
+    <p class="muted small">Die Nachtruhe zählt zu ${esc(M.pct(nightPct() / 100))}. Den Anteil kannst du unter „Einstellungen“ ändern.</p>
+    <label class="label">Beginn der Nachtruhe</label>
+    <div class="field-row">
+      <label class="label">Tag<input type="date" id="n1-date" value="${M.dayKey(a)}"></label>
+      <label class="label">Uhrzeit<input type="time" id="n1-time" value="${M.fmtTime(a)}"></label>
+    </div>
+    <label class="label">Start am Morgen</label>
+    <div class="field-row">
+      <label class="label">Tag<input type="date" id="n2-date" value="${M.dayKey(z)}"></label>
+      <label class="label">Uhrzeit<input type="time" id="n2-time" value="${M.fmtTime(z)}"></label>
+    </div>
+    ${ERR}
+    <button class="btn primary" data-act="addNightSave">Nachtruhe eintragen</button>
+    ${CANCEL}`,
+    { type: 'addNight', id: b.id }
   );
 }
 
@@ -1510,6 +1584,8 @@ function placeSheetHtml(p) {
       <span>Ausführlicher Bericht: Jeder Abschnitt zwischen zwei Pausen bekommt eine eigene Zeile und eine eigene Notiz. Beim Stopp erinnert die App an fehlende Notizen.</span></label>
     <label class="check"><input type="checkbox" data-change="placeFlag" data-key="home" ${p.home ? 'checked' : ''}>
       <span>Das ist mein Arbeitsplatz zu Hause. Tage an diesem Ort zählen in der Übersicht für die Steuer als „zu Hause gearbeitet“.</span></label>
+    <label class="check"><input type="checkbox" data-change="placeFlag" data-key="trip" ${p.trip ? 'checked' : ''}>
+      <span>Klassenfahrt oder Ausflug: Es gibt den Knopf „Nachtruhe“, und die App fragt nicht nach, wenn die Uhr lange läuft.</span></label>
     ${ERR}
     <button class="btn primary" data-act="sheetDone">Fertig</button>
     ${
@@ -1562,11 +1638,18 @@ function sheetNotes(b) {
 
 // ---------- Aktionen ----------
 
+// Anteil für neu eingetragene Nachtruhe in Prozent (Einstellungen, Standard 50)
+function nightPct() {
+  const v = Number(state.settings.nightPct);
+  return Number.isFinite(v) && v >= 0 && v <= 100 ? v : 50;
+}
+
 function doStop(b, t) {
   const last = M.lastEvent(b);
-  if (last.t === 'pause') {
-    // Nach der Pause wurde nicht weitergearbeitet: Die Arbeit endete mit Beginn der Pause.
+  if (last.t === 'pause' || last.t === 'nacht') {
+    // Nach der Pause (oder Nachtruhe) wurde nicht weitergearbeitet: Die Arbeit endete mit ihrem Beginn.
     last.t = 'stopp';
+    delete last.f;
   } else {
     b.events.push({ t: 'stopp', ts: Math.max(t, last.ts) });
   }
@@ -1642,7 +1725,8 @@ const actions = {
 
   weiter() {
     const b = openBlock();
-    if (b && M.stateOf(b) === 'paused') {
+    // Nach einer Pause „Weiter“, nach der Nachtruhe heißt der Knopf „Start“ (gespeichert wird beides als 'weiter')
+    if (b && (M.stateOf(b) === 'paused' || M.stateOf(b) === 'night')) {
       b.events.push({ t: 'weiter', ts: Math.max(now(), M.lastEvent(b).ts) });
       saveBlock(b);
     }
@@ -1652,8 +1736,44 @@ const actions = {
   stopp() {
     const b = openBlock();
     if (!b) return render();
+    const fromNight = M.stateOf(b) === 'night';
     doStop(b, now());
     afterStop(b);
+    if (fromNight) {
+      toast(`Die Fahrt endet mit Beginn der Nachtruhe um ${M.fmtTime(M.lastEvent(b).ts)} Uhr. Wenn das nicht stimmt, tippe den Arbeitsblock an und ändere „Stopp“.`, 9000);
+    }
+  },
+
+  // Klassenfahrt: Nachtruhe beginnt. Sie merkt sich den Anteil, der gerade eingestellt ist.
+  nacht() {
+    const b = openBlock();
+    if (b && M.stateOf(b) === 'running') {
+      b.events.push({ t: 'nacht', ts: Math.max(now(), M.lastEvent(b).ts), f: nightPct() / 100 });
+      saveBlock(b);
+      toast(`Gute Nacht! Die Nachtruhe zählt zu ${M.pct(nightPct() / 100)}.`);
+    }
+    render();
+  },
+
+  addNight() {
+    const b = byId(ui.detailId);
+    if (b) sheetAddNight(b);
+  },
+
+  addNightSave() {
+    const b = byId(ui.sheet.id);
+    const from = readDT('n1');
+    const to = readDT('n2');
+    if (from == null || to == null) return sheetErr('Bitte Tag und Uhrzeit für Beginn und Start am Morgen eintragen.');
+    if (to <= from) return sheetErr('Der Start am Morgen muss nach dem Beginn der Nachtruhe liegen.');
+    const seg = M.segments(b, now()).find((s) => s.kind === 'work' && s.from <= from && to <= s.to);
+    if (!seg) {
+      return sheetErr('Die Nachtruhe muss ganz in der Zeit der Fahrt liegen und darf sich nicht mit einer Pause oder einer anderen Nachtruhe überschneiden. Tipp: Prüfe im Protokoll, ob „Stopp“ am richtigen Tag steht.');
+    }
+    b.events.splice(seg.idx + 1, 0, { t: 'nacht', ts: from, f: nightPct() / 100 }, { t: 'weiter', ts: to });
+    saveBlock(b);
+    closeSheet();
+    render();
   },
 
   openDetail(el) {
@@ -1722,6 +1842,12 @@ const actions = {
     if (ts == null) return sheetErr('Bitte Tag und Uhrzeit eintragen.');
     const copy = structuredClone(b);
     copy.events[ui.sheet.idx].ts = ts;
+    const fEl = $('#ev-f');
+    if (fEl) {
+      const v = Number(fEl.value);
+      if (fEl.value === '' || !Number.isFinite(v) || v < 0 || v > 100) return sheetErr('Bitte bei „zählt zu“ eine Zahl von 0 bis 100 eintragen.');
+      copy.events[ui.sheet.idx].f = v / 100;
+    }
     const err = M.validate(copy, now());
     if (err) return sheetErr(err);
     b.events = copy.events;
@@ -1790,9 +1916,10 @@ const actions = {
     if (ts == null) return sheetErr('Bitte Tag und Uhrzeit eintragen.');
     const copy = structuredClone(b);
     const last = M.lastEvent(copy);
-    if (last.t === 'pause' && ts <= last.ts) {
+    if ((last.t === 'pause' || last.t === 'nacht') && ts <= last.ts) {
       last.t = 'stopp';
       last.ts = ts;
+      delete last.f;
     } else {
       copy.events.push({ t: 'stopp', ts });
     }
@@ -2212,8 +2339,10 @@ const actions = {
   },
 
   async exp(el) {
-    const rep = currentReport();
-    if (!rep.rows.length) return toast('In diesem Zeitraum gibt es noch keine Zeiten.');
+    // Nachtruhe nur mit Häkchen (anfangs aus)
+    const night = !!state.settings.expNight;
+    const rep = currentReport(repPeriod(), night);
+    if (!rep.rows.length) return toast(night ? 'In diesem Zeitraum gibt es noch keine Zeiten.' : 'In diesem Zeitraum gibt es ohne Nachtruhe keine Zeiten.');
     const pdf = el.dataset.kind === 'pdf';
     const safe = rep.fileLabel.replace(/[^A-Za-z0-9ÄÖÜäöüß]+/g, '-').replace(/^-|-$/g, '') || 'Bericht';
     const name = `Arbeitszeit-${safe}-${rep.period.key}.${pdf ? 'pdf' : 'xlsx'}`;
@@ -2225,7 +2354,7 @@ const actions = {
       const months = pdf
         ? []
         : monthPeriods(rep.period).map((p) => {
-            const r = currentReport(p);
+            const r = currentReport(p, night);
             r.marks = exportMarks(r);
             return { name: p.name, label: p.label, rep: r };
           });
@@ -2397,7 +2526,11 @@ const inputs = {
     const key = el.dataset.key;
     const s = state.settings;
     if (key === 'userName') s.userName = el.value.trim();
-    else {
+    else if (key === 'nightPct') {
+      const n = Number(el.value);
+      if (el.value === '' || !Number.isFinite(n) || n < 0 || n > 100) return;
+      s.nightPct = n;
+    } else {
       const n = Number(el.value);
       if (!Number.isFinite(n) || n < 1 || n > 48) return;
       s[key] = n;

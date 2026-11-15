@@ -225,6 +225,12 @@ export function reportSheet(rep) {
       rows.push([T(dateOf(r)), { v: clock(r.from), s: S.time }, { v: clock(r.to), s: S.time }, T(''), { v: r.ms / 86400000, s: S.dur }, T(r.note)]);
     } else if (r.type === 'pause') {
       rows.push([T(''), T(''), T(''), T(`${fmtTime(r.from)}–${fmtTime(r.to)}`), T(''), T('')]);
+    } else if (r.type === 'night') {
+      // Nachtruhe bei Klassenfahrten: bei „Stunden“ der gezählte Anteil, damit die Summe stimmt
+      const times = [{ v: clock(r.from), s: S.time }, { v: clock(r.to), s: S.time }];
+      const hrs = { v: r.ms / 86400000, s: S.dur };
+      if (rep.detailed) rows.push([T(dateOf(r)), ...times, T(''), hrs, T(r.text)]);
+      else rows.push([T(dateOf(r)), ...(rep.all ? [T('')] : []), T('Nachtruhe'), ...times, { v: '', s: S.dur }, hrs, T(r.text)]);
     } else {
       rows.push([
         T(dateOf(r)),
@@ -245,6 +251,7 @@ export function reportSheet(rep) {
   sumRow[hoursIdx] = { v: rep.totalMs / 86400000, s: S.boldDur };
   if (lastData >= firstData) sumRow[hoursIdx].f = `SUM(${col}${firstData}:${col}${lastData})`;
   rows.push(sumRow);
+  if (rep.nightText) rows.push([rep.nightText]);
 
   // Auf Wunsch: Kranken- und Ferientage unter der Summe
   markLines(rep, rows);
@@ -300,6 +307,7 @@ function overviewSheet(rep, months) {
     { v: rep.period.sumLabel, s: S.boldText },
     { v: rep.totalMs / 86400000, s: S.boldDur, f: `SUM(B${firstData}:B${lastData})` },
   ]);
+  if (rep.nightText) rows.push([rep.nightText]);
   markLines(rep, rows);
   sumSections(rep, rows);
   rows.push([], ['Jeder Monat mit Zeiten steht auf einem eigenen Blatt (die Reiter unten).']);
