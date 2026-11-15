@@ -6,7 +6,7 @@ import { PERIOD_KINDS, buildReport, ferienNRW, holidaysNRW, period, shiftAnchor,
 import { reportPdf } from './pdf.js';
 import { reportXlsx } from './xlsx.js';
 
-const VERSION = '0.13 · Ferientage';
+const VERSION = '0.14 · Kranken- und Ferientage im PDF und Excel';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) =>
@@ -825,6 +825,38 @@ function vacLines(from, to, place = 'all') {
     <div class="tax-row"><span class="tax-name">In den Ferien gearbeitet<small>${w.days ? `an ${nDaysDat(w.days)}` : 'an keinem Ferientag'}${place === 'all' ? '' : ` am Arbeitsort „${esc(placeName(place))}“`}</small></span><b>${M.fmtDur(w.ms)} Std.</b></div>`;
 }
 
+// Kranken- und Ferientage für PDF und Excel, je nach Häkchen bei „Diesen Bericht speichern“.
+// Gibt null zurück, wenn beide Häkchen aus sind. Sonst:
+//   lines: Zeilen unter der Summe, z. B. ['Als Ferien markiert', '15 Tage (17.10.–31.10.2026)']
+//   tag(ts): Zusatz hinter dem Datum in der Liste, z. B. 'Ferien' oder 'krank'
+function exportMarks(rep) {
+  const s = state.settings;
+  if (!s.expSick && !s.expVac) return null;
+  const { from, to } = rep.period;
+  const place = rep.all ? 'all' : rep.place;
+  const listText = (keys) => dayRanges(keys, from, to).map((r) => (r.n === 1 ? `${dm(r.from)}${new Date(r.from).getFullYear()}` : rangeText(r))).join(', ');
+  const lines = [];
+  if (s.expSick) {
+    const n = sickCount(from, to);
+    lines.push(['Als krank markiert', n.all ? `${nDays(n.all)} (${listText(sickDays())})` : 'keine Tage']);
+  }
+  if (s.expVac) {
+    const n = vacCount(from, to);
+    lines.push(['Als Ferien markiert', n.all ? `${nDays(n.all)} (${listText(vacDays())})` : 'keine Tage']);
+    if (n.all) {
+      const w = vacWork(from, to, place);
+      lines.push(['In den Ferien gearbeitet', w.days ? `${M.fmtDur(w.ms)} Std. an ${nDaysDat(w.days)}` : 'an keinem Ferientag']);
+    }
+  }
+  const sick = new Set(s.expSick ? sickDays() : []);
+  const vac = new Set(s.expVac ? vacDays() : []);
+  const tag = (ts) => {
+    const k = M.dayKey(ts);
+    return [sick.has(k) ? 'krank' : '', vac.has(k) ? 'Ferien' : ''].filter(Boolean).join(', ');
+  };
+  return { lines, tag };
+}
+
 // Zählt die markierten Tage in einem Zeitraum: alle und die an Werktagen (Mo–Fr, ohne Feiertage in NRW)
 function dayCount(list, from, to) {
   let all = 0;
@@ -1127,7 +1159,12 @@ function viewReport() {
     }
     <section class="card"><h2>Nach Kategorie</h2>${barList(rep.byCategory, rep.totalMs, false)}</section>
     ${columnChart(rep)}
-    <section class="card"><h2>Diesen Bericht speichern</h2>${exportBtns('pdf', 'PDF')}${exportBtns('xlsx', 'Excel')}
+    <section class="card"><h2>Diesen Bericht speichern</h2>
+      <div class="switches exp-switches">
+        <label class="check slim"><input type="checkbox" data-change="expMark" data-key="expSick" ${state.settings.expSick ? 'checked' : ''}><span>Krankentage im PDF und in Excel mit aufführen</span></label>
+        <label class="check slim"><input type="checkbox" data-change="expMark" data-key="expVac" ${state.settings.expVac ? 'checked' : ''}><span>Ferien im PDF und in Excel mit aufführen</span></label>
+      </div>
+      ${exportBtns('pdf', 'PDF')}${exportBtns('xlsx', 'Excel')}
       ${!rep.userName ? '<p class="muted small">Dein Name fehlt noch in der Kopfzeile. Du kannst ihn unter „Einstellungen“ eintragen.</p>' : ''}</section>
     ${reportTable(rep)}`;
   }
@@ -2168,6 +2205,7 @@ const actions = {
     const safe = rep.fileLabel.replace(/[^A-Za-z0-9ÄÖÜäöüß]+/g, '-').replace(/^-|-$/g, '') || 'Bericht';
     const name = `Arbeitszeit-${safe}-${rep.period.key}.${pdf ? 'pdf' : 'xlsx'}`;
     const type = pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    rep.marks = exportMarks(rep);
     let file;
     try {
       file = new File([pdf ? reportPdf(rep) : reportXlsx(rep)], name, { type });
@@ -2404,6 +2442,11 @@ const changes = {
     state.settings.showVac = el.checked;
     saveSettings();
     renderKeepScroll();
+  },
+  // Häkchen „Krankentage / Ferien im PDF und in Excel“: gilt bis zum nächsten Umschalten
+  expMark(el) {
+    state.settings[el.dataset.key] = el.checked;
+    saveSettings();
   },
   // Felder „von … bis“ auf der Ferien-Seite merken (der Bildschirm wird sonst neu gezeichnet)
   vacDate(el) {

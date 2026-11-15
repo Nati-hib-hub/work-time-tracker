@@ -204,6 +204,7 @@ export function reportSheet(rep) {
     ? ['Datum', 'Von', 'Bis', 'Pause', 'Stunden', 'Tätigkeit (Stichworte)']
     : ['Datum', ...(rep.all ? ['Arbeitsort'] : []), 'Kategorie', 'Von', 'Bis', 'Pause', 'Stunden', 'Notiz'];
   const widths = rep.detailed ? [16, 8, 8, 14, 10, 48] : [17, ...(rep.all ? [24] : []), 24, 8, 8, 8, 10, 48];
+  if (rep.marks) widths[0] = 23; // Platz für „(Ferien)“ hinter dem Datum
   const hoursIdx = heads.indexOf('Stunden');
 
   const rows = [
@@ -214,14 +215,19 @@ export function reportSheet(rep) {
     heads.map((v) => ({ v, s: S.head })),
   ];
   const firstData = rows.length + 1;
+  // Datum, auf Wunsch mit „(krank)“ oder „(Ferien)“ dahinter
+  const dateOf = (r) => {
+    const tag = r.date && rep.marks ? rep.marks.tag(r.from) : '';
+    return tag ? `${r.date} (${tag})` : r.date;
+  };
   for (const r of rep.rows) {
     if (r.type === 'work') {
-      rows.push([T(r.date), { v: clock(r.from), s: S.time }, { v: clock(r.to), s: S.time }, T(''), { v: r.ms / 86400000, s: S.dur }, T(r.note)]);
+      rows.push([T(dateOf(r)), { v: clock(r.from), s: S.time }, { v: clock(r.to), s: S.time }, T(''), { v: r.ms / 86400000, s: S.dur }, T(r.note)]);
     } else if (r.type === 'pause') {
       rows.push([T(''), T(''), T(''), T(`${fmtTime(r.from)}–${fmtTime(r.to)}`), T(''), T('')]);
     } else {
       rows.push([
-        T(r.date),
+        T(dateOf(r)),
         ...(rep.all ? [T(r.placeName)] : []),
         T(r.category),
         { v: clock(r.from), s: S.time },
@@ -239,6 +245,12 @@ export function reportSheet(rep) {
   sumRow[hoursIdx] = { v: rep.totalMs / 86400000, s: S.boldDur };
   if (lastData >= firstData) sumRow[hoursIdx].f = `SUM(${col}${firstData}:${col}${lastData})`;
   rows.push(sumRow);
+
+  // Auf Wunsch: Kranken- und Ferientage unter der Summe (ohne Rahmen, damit der Text in die Nachbarzellen laufen darf)
+  if (rep.marks && rep.marks.lines.length) {
+    rows.push([]);
+    for (const [label, value] of rep.marks.lines) rows.push([`${label}: ${value}`]);
+  }
 
   // In der Übersicht zusätzlich: Summen je Arbeitsort und je Kategorie
   const section = (title, items) => {

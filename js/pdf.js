@@ -218,11 +218,16 @@ export function reportPdf(rep) {
     doc.line(L, y, R, y, 0.45, 0.8);
   };
 
+  // Datum, auf Wunsch mit „(krank)“ oder „(Ferien)“ dahinter
+  const dateOf = (row) => {
+    const tag = row.date && rep.marks ? rep.marks.tag(row.from) : '';
+    return tag ? `${row.date} (${tag})` : row.date;
+  };
   const cellsOf = (row) => {
-    if (row.type === 'work') return [row.date, fmtTime(row.from), fmtTime(row.to), '', fmtDur(row.ms), row.note];
+    if (row.type === 'work') return [dateOf(row), fmtTime(row.from), fmtTime(row.to), '', fmtDur(row.ms), row.note];
     if (row.type === 'pause') return ['', '', '', `${fmtTime(row.from)}–${fmtTime(row.to)}`, '', ''];
     return [
-      row.date,
+      dateOf(row),
       ...(rep.all ? [row.placeName] : []),
       row.category,
       fmtTime(row.from),
@@ -268,6 +273,22 @@ export function reportPdf(rep) {
   doc.text(L + PADX, y, rep.period.sumLabel, { size: 10.5, bold: true });
   doc.text(hours.x + hours.w - PADX, y, fmtDur(rep.totalMs), { size: 10.5, bold: true, align: 'right' });
   doc.text(afterHours.x + PADX, y, 'Stunden', { size: 10.5 });
+
+  // Auf Wunsch: Kranken- und Ferientage unter der Summe
+  if (rep.marks && rep.marks.lines.length) {
+    const LABEL_W = 150;
+    const prepared = rep.marks.lines.map(([label, value]) => ({ label, lines: doc.wrap(value, R - L - LABEL_W - 2 * PADX, FS, false) }));
+    const need = 18 + prepared.reduce((s, p) => s + p.lines.length * LH + 4, 0);
+    if (y + need > BOTTOM) {
+      header(false, false);
+      y += 4;
+    } else y += 22;
+    for (const p of prepared) {
+      doc.text(L + PADX, y, `${p.label}:`, { size: FS, bold: true });
+      p.lines.forEach((ln, k) => doc.text(L + LABEL_W + PADX, y + k * LH, ln, { size: FS }));
+      y += p.lines.length * LH + 4;
+    }
+  }
 
   // In der Übersicht zusätzlich: Summen je Arbeitsort und je Kategorie
   // Die beiden Listen stehen nebeneinander.
